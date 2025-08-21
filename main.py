@@ -15,7 +15,7 @@ nltk.download('punkt')
 
 # Hyperparameters
 
-batch_size = 64
+batch_size = 55
 block_size = 256
 MAX_LENGTH = 64
 learning_rate = 1e-5
