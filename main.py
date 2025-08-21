@@ -63,7 +63,7 @@ dropout = 0.1
 max_epochs = 20
 max_new_tokens = 50
 temperature = 1.0
-num_workers = 0
+num_workers = 8
 
 
 # Directory setup
