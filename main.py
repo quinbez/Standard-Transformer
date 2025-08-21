@@ -3,6 +3,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 from torch.utils.data import Dataset, DataLoader, Subset
 from torch.nn.utils.rnn import pad_sequence
+from torch.nn.parallel import DistributedDataParallel as DDP
 from tokenizers import Tokenizer, models, trainers, pre_tokenizers
 import os
 import pickle
@@ -11,11 +12,45 @@ import nltk
 from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
 from bert_score import score as bertscore
 import time
+import argparse
 nltk.download('punkt')
+import os
+import gc
+import torch.distributed as dist
+
+def cleanup_memory():
+    """Comprehensive memory cleanup"""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
+def setup_device():
+    """Setup device for training with optional DDP support"""
+    if "WORLD_SIZE" in os.environ and torch.cuda.is_available():
+        # DDP mode
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+        use_ddp = True
+        print(f"DDP mode: Using device cuda:{local_rank}")
+    elif torch.cuda.is_available():
+        # Single GPU mode
+        local_rank = 0
+        device = torch.device("cuda:0")
+        use_ddp = False
+        print(f"Single GPU mode: Using device cuda:0")
+    else:
+        # CPU mode
+        local_rank = 0
+        device = torch.device("cpu")
+        use_ddp = False
+        print("CPU mode: Using device cpu")
+    return local_rank, device, use_ddp
 
 # Hyperparameters
 
-batch_size = 55
+batch_size = 64
 block_size = 256
 MAX_LENGTH = 64
 learning_rate = 1e-5
@@ -135,30 +170,46 @@ class PennTreebankDataset(Dataset):
         
         return {"input_ids": input_ids, "target_ids": target_ids}
 
-# Create datasets with Subset
-train_dataset = PennTreebankDataset("train_ids.pkl", TOKENIZER_DIR, MAX_LENGTH)
-# train_dataset = Subset(train_dataset, range(min(len(train_dataset), 50000)))
-val_dataset = PennTreebankDataset("valid_ids.pkl", TOKENIZER_DIR,  MAX_LENGTH)
-test_dataset = PennTreebankDataset("test_ids.pkl", TOKENIZER_DIR,  MAX_LENGTH)
-# test_dataset = Subset(test_dataset, range(min(len(test_dataset), 25000)))
+def create_data_loaders(use_ddp=False):
+    """Create data loaders with optional DDP support"""
+    # Create datasets
+    train_dataset = PennTreebankDataset("train_ids.pkl", TOKENIZER_DIR, MAX_LENGTH)
+    val_dataset = PennTreebankDataset("valid_ids.pkl", TOKENIZER_DIR, MAX_LENGTH)
+    test_dataset = PennTreebankDataset("test_ids.pkl", TOKENIZER_DIR, MAX_LENGTH)
 
-# Create data loaders
-train_loader = DataLoader(
-    train_dataset,
-    batch_size=batch_size,
-    shuffle=True,
-    collate_fn=lambda batch: pad_collate_fn(batch, pad_token_id)
-)
-valid_loader = DataLoader(
-    val_dataset,
-    batch_size=batch_size,
-    collate_fn=lambda batch: pad_collate_fn(batch, pad_token_id)
-)
-test_loader = DataLoader(
-    test_dataset,
-    batch_size=batch_size,
-    collate_fn=lambda batch: pad_collate_fn(batch, pad_token_id)
-)
+    if use_ddp:
+        from torch.utils.data.distributed import DistributedSampler
+        train_sampler = DistributedSampler(train_dataset, shuffle=True)
+        val_sampler = DistributedSampler(val_dataset, shuffle=False)
+        test_sampler = DistributedSampler(test_dataset, shuffle=False)
+        shuffle = False  # Don't shuffle when using DistributedSampler
+    else:
+        train_sampler = None
+        val_sampler = None
+        test_sampler = None
+        shuffle = True
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        sampler=train_sampler,
+        collate_fn=lambda batch: pad_collate_fn(batch, pad_token_id)
+    )
+    valid_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        sampler=val_sampler,
+        collate_fn=lambda batch: pad_collate_fn(batch, pad_token_id)
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        sampler=test_sampler,
+        collate_fn=lambda batch: pad_collate_fn(batch, pad_token_id)
+    )
+
+    return train_loader, valid_loader, test_loader
 # Padding collate function
 def pad_collate_fn(batch, pad_token_id=0):
     input_seqs = [item["input_ids"] for item in batch]
@@ -260,7 +311,7 @@ class LanguageModel(nn.Module):
     def forward(self, idx, targets=None):
         B, T = idx.shape
         tok_emb = self.token_embedding_table(idx)
-        pos_emb = self.position_embedding_table(torch.arange(T))
+        pos_emb = self.position_embedding_table(torch.arange(T, device=idx.device))
         x = tok_emb + pos_emb
         x = self.blocks(x)
         x = self.ln_f(x)
@@ -276,16 +327,19 @@ class LanguageModel(nn.Module):
 
 
 # Training function
-def train(model, train_loader, optimizer, epoch):
+def train(model, train_loader, optimizer, epoch, device):
     model.train()
     total_loss = 0
     total_batches = 0
 
+    # Get rank for distributed training
+    rank = dist.get_rank() if dist.is_initialized() else 0
+
     for batch_idx, batch in enumerate(train_loader):
-        xb = batch['input_ids']
-        yb = batch['target_ids']
+        xb = batch['input_ids'].to(device)
+        yb = batch['target_ids'].to(device)
+
         logits, loss = model(xb, yb)
-        # print(f"logits shape: {logits.shape}, targets shape: {yb.shape}")
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
@@ -293,8 +347,12 @@ def train(model, train_loader, optimizer, epoch):
         total_loss += loss.item()
         total_batches += 1
 
-        if (batch_idx + 1) % 10 == 0:
+        # Only print from rank 0 in distributed training
+        if rank == 0 and (batch_idx + 1) % 10 == 0:
             print(f"  Batch {batch_idx + 1}/{len(train_loader)} | train_loss {loss.item():.4f} | train_perplexity {torch.exp(loss).item():.4f}", flush=True)
+
+        # Clean up memory
+        cleanup_memory()
 
     avg_loss = total_loss / total_batches
     avg_perplexity = torch.exp(torch.tensor(avg_loss)).item()
@@ -319,24 +377,29 @@ def compute_text_metrics(predictions, targets):
     print(f"BLEU Score: {bleu:.4f}")
 
 @torch.no_grad()
-def evaluate(model, test_loader, tokenizer, max_batches=None, compute_metrics=True):
+def evaluate(model, test_loader, tokenizer, device, max_batches=None, compute_metrics=True):
     start_time = time.time()
     model.eval()
     total_loss = 0
     total_batches = 0
     pad_token_id = tokenizer.token_to_id("[PAD]")
     decoded_targets, decoded_predictions = [], []
-    if max_batches is None:
-        print(f"Evaluating on the full test set...")
-    else:
-        print(f"Evaluating on up to {max_batches} batches...")
+
+    # Get rank for distributed training
+    rank = dist.get_rank() if dist.is_initialized() else 0
+
+    if rank == 0:
+        if max_batches is None:
+            print(f"Evaluating on the full test set...")
+        else:
+            print(f"Evaluating on up to {max_batches} batches...")
 
     for batch_idx, batch in enumerate(test_loader):
         if max_batches is not None and batch_idx >= max_batches:
             break
 
-        input_ids = batch['input_ids']
-        targets = batch['target_ids']
+        input_ids = batch['input_ids'].to(device)
+        targets = batch['target_ids'].to(device)
 
         # Compute loss
         logits, loss = model(input_ids, targets)
@@ -347,99 +410,160 @@ def evaluate(model, test_loader, tokenizer, max_batches=None, compute_metrics=Tr
              preds = torch.argmax(logits, dim=-1)
              mask = targets != pad_token_id
              for i in range(preds.size(0)):
-                pred_str = decode_ids(tokenizer, preds[i][mask[i]].tolist(), stop_at_eos=True)
-                tgt_str = decode_ids(tokenizer, targets[i][mask[i]].tolist(), stop_at_eos=True)
+                pred_str = decode_ids(tokenizer, preds[i][mask[i]].cpu().tolist(), stop_at_eos=True)
+                tgt_str = decode_ids(tokenizer, targets[i][mask[i]].cpu().tolist(), stop_at_eos=True)
                 decoded_predictions.append(pred_str)
                 decoded_targets.append(tgt_str)
 
-           
-    if compute_metrics and decoded_predictions and decoded_targets:
+        # Clean up memory
+        cleanup_memory()
+
+    if rank == 0 and compute_metrics and decoded_predictions and decoded_targets:
         compute_text_metrics(decoded_predictions, decoded_targets)
-           
 
     # Compute average loss and perplexity
     avg_loss = total_loss / total_batches if total_batches > 0 else float('inf')
     avg_perplexity = torch.exp(torch.tensor(avg_loss)).item() if avg_loss != float('inf') else float('inf')
-    elapsed = time.time() - start_time
-    print(f"Evaluation completed in {elapsed:.2f} seconds")
-    print(f"Total Batches Processed: {batch_idx + 1}")
-    print(f"Avg Test CE Loss: {avg_loss:.4f} | Avg Test Perplexity: {avg_perplexity:.4f}")
-    return avg_loss,avg_perplexity
+
+    if rank == 0:
+        elapsed = time.time() - start_time
+        print(f"Evaluation completed in {elapsed:.2f} seconds")
+        print(f"Total Batches Processed: {batch_idx + 1}")
+        print(f"Avg Test CE Loss: {avg_loss:.4f} | Avg Test Perplexity: {avg_perplexity:.4f}")
+
+    return avg_loss, avg_perplexity
 
 
 
-# Training phase
-model = LanguageModel()
-print(sum(p.numel() for p in model.parameters())/1e6, 'M parameters')
+def main():
+    """Main training function with DDP support"""
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--flash', action='store_true', help='Enable FlashAttention (not implemented in this model)')
+    args = parser.parse_args()
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+    # Setup device and DDP
+    local_rank, device, use_ddp = setup_device()
 
-print("Starting training...")
-start_training_time = time.time()
-for epoch in range(max_epochs):
-    print(f"\nEpoch {epoch + 1}/{max_epochs}")
-    avg_loss, avg_perplexity = train(model, train_loader, optimizer, epoch)
-    print(f"Epoch {epoch + 1} completed | avg_train_loss {avg_loss:.4f} | avg_train_perplexity {avg_perplexity:.4f}")
-total_training_time = time.time() - start_training_time
-print(f"Total Training Time: {total_training_time:.2f} seconds", flush=True)
-print("========== Training completed ==========", flush=True)
-# Save model
-save_path = "checkpoints/gpt_backprop.pt"
-os.makedirs(os.path.dirname(save_path), exist_ok=True)
-if os.path.exists(save_path):
-        os.remove(save_path)
-torch.save({"model_state": model.state_dict()}, save_path)
-print("Model saved.")
+    if use_ddp and not dist.is_initialized():
+        dist.init_process_group(backend="nccl")
+
+    # Get rank for printing
+    rank = dist.get_rank() if dist.is_initialized() else 0
+
+    # Load tokenizer
+    tokenizer = load_tokenizer()
+
+    # Create data loaders
+    train_loader, valid_loader, test_loader = create_data_loaders(use_ddp=use_ddp)
+
+    # Create model and move to device
+    model = LanguageModel().to(device)
+
+    if rank == 0:
+        print(f"Model parameters: {sum(p.numel() for p in model.parameters())/1e6:.2f}M")
+
+    # Wrap model with DDP if needed
+    if use_ddp:
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+
+    if rank == 0:
+        print("Starting training...")
+
+    start_training_time = time.time()
+
+    for epoch in range(max_epochs):
+        # Set epoch for distributed sampler
+        if hasattr(train_loader, "sampler") and hasattr(train_loader.sampler, "set_epoch"):
+            train_loader.sampler.set_epoch(epoch)
+
+        if rank == 0:
+            print(f"\nEpoch {epoch + 1}/{max_epochs}")
+
+        avg_loss, avg_perplexity = train(model, train_loader, optimizer, epoch, device)
+
+        if rank == 0:
+            print(f"Epoch {epoch + 1} completed | avg_train_loss {avg_loss:.4f} | avg_train_perplexity {avg_perplexity:.4f}")
+
+    if rank == 0:
+        total_training_time = time.time() - start_training_time
+        print(f"Total Training Time: {total_training_time:.2f} seconds", flush=True)
+        print("========== Training completed ==========", flush=True)
+
+        # Save model
+        save_path = "checkpoints/gpt_backprop.pt"
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        if os.path.exists(save_path):
+            os.remove(save_path)
+
+        # Save the actual model state dict (unwrap DDP if needed)
+        model_state = model.module.state_dict() if use_ddp else model.state_dict()
+        torch.save({"model_state": model_state}, save_path)
+        print("Model saved.")
+
+        # Evaluate with metrics
+        test_loss, test_perplexity = evaluate(model, test_loader, tokenizer, device, max_batches=10, compute_metrics=True)
+
+    # Clean up DDP
+    if use_ddp and dist.is_initialized():
+        dist.destroy_process_group()
+
+    return model, test_loader, tokenizer, device if rank == 0 else (None, None, None, None)
+
+def generate(model, input_ids, device, max_new_tokens=50, temperature=1.0):
+    """Generate text samples from the model"""
+    model.eval()
+    input_tensor = input_ids.unsqueeze(0).to(device)  # Add batch dimension and move to device
+
+    for _ in range(max_new_tokens):
+        if input_tensor.size(1) > block_size:
+            input_tensor = input_tensor[:, -block_size:]
+        with torch.no_grad():
+            logits, _ = model(input_tensor)
+            logits = logits[:, -1, :] / temperature
+            probs = F.softmax(logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
+            input_tensor = torch.cat((input_tensor, next_token), dim=1)
+        if next_token.item() == eos_token_id:
+            break
+
+    return input_tensor[0].cpu()  # Move back to CPU for processing
 
 
+def run_generation_samples(model, test_loader, tokenizer, device):
+    """Run generation samples if we're on rank 0"""
+    for batch_idx, batch in enumerate(test_loader):
+        input_ids = batch["input_ids"]
+        target_ids = batch["target_ids"]
+        break
 
-# Evaluate with metrics
-test_loss,test_perplexity = evaluate(model, test_loader, tokenizer, max_batches=10, compute_metrics=True)
+    num_samples = 5
+    prompt_len = 4
 
-# Generate samples
-def generate(self, input_ids, max_new_tokens=50, temperature=1.0):
-            model.eval()
-            input_tensor = input_ids.unsqueeze(0) # Add batch dimension
+    for i in range(num_samples):
+        prompt_ids = input_ids[i][:prompt_len]
+        generated_ids = generate(model, prompt_ids, device, max_new_tokens=50, temperature=0.7)
 
-            for _ in range(max_new_tokens):
-                if input_tensor.size(1) > block_size:
-                    input_tensor = input_tensor[:, -block_size:]
-                with torch.no_grad():
-                    logits, _ = self(input_tensor)
-                    logits = logits[:, -1, :] / temperature
-                    probs = F.softmax(logits, dim=-1)
-                    next_token = torch.multinomial(probs, num_samples=1)
-                    input_tensor = torch.cat((input_tensor, next_token), dim=1)
-                if next_token.item() == eos_token_id:
-                    break
-            
-            return input_tensor[0] 
+        target_continuation = target_ids[i][prompt_len:]
+        target_continuation = target_continuation[target_continuation != pad_token_id].tolist()
+
+        generated_continuation = generated_ids[prompt_len:].tolist()
+
+        # Decode all
+        prompt_str = decode_ids(tokenizer, prompt_ids.tolist())
+        target_str = decode_ids(tokenizer, target_continuation, stop_at_eos=True)
+        predict_str = decode_ids(tokenizer, generated_continuation, stop_at_eos=True)
+
+        print(f"\n[Batch {batch_idx + 1}, Sample {i + 1}]")
+        print(f"[PROMPT ]: {prompt_str}")
+        print(f"[TARGET ]: {target_str}")
+        print(f"[PREDICT]: {predict_str}")
 
 
-for batch_idx, batch in enumerate(test_loader):
-    input_ids = batch["input_ids"]
-    target_ids = batch["target_ids"]
-    break 
+if __name__ == "__main__":
+    model, test_loader, tokenizer, device = main()
 
-num_samples = 5
-prompt_len = 4
-i = 64
-
-for i in range(num_samples):
-    prompt_ids = input_ids[i][:prompt_len]
-    generated_ids = generate(model,prompt_ids, max_new_tokens= 50, temperature=0.7)
-
-    target_continuation = target_ids[i][prompt_len:]
-    target_continuation = target_continuation[target_continuation != pad_token_id].tolist()
-
-    generated_continuation = generated_ids[prompt_len:].tolist()
-
-    # Decode all
-    prompt_str = decode_ids(tokenizer, prompt_ids.tolist())
-    target_str = decode_ids(tokenizer, target_continuation, stop_at_eos=True)
-    predict_str = decode_ids(tokenizer, generated_continuation, stop_at_eos=True)
-
-    print(f"\n[Batch {batch_idx + 1}, Sample {i + 1}]")
-    print(f"[PROMPT ]: {prompt_str}")
-    print(f"[TARGET ]: {target_str}")
-    print(f"[PREDICT]: {predict_str}")
+    # Run generation samples only on rank 0
+    if model is not None:
+        run_generation_samples(model, test_loader, tokenizer, device)
