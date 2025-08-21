@@ -3,13 +3,17 @@ import math
 import torch
 from main import get_loaders
 import torch.nn.functional as F
-from main import load_tokenizer, load_model,setup_device, cleanup_memory,decode_ids,compute_text_metrics
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from main import load_tokenizer,load_model,setup_device, cleanup_memory,decode_ids,compute_text_metrics
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 import nltk
 from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
 from bert_score import score as bertscore
 import argparse
+
 
 local_rank, device, use_ddp = setup_device()
 @torch.no_grad()
