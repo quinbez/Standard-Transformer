@@ -579,8 +579,8 @@ def main():
         dist.destroy_process_group()
 
     # return (model, test_loader, tokenizer, device, pad_token_id, eos_token_id) if rank == 0 else (None, None, None, None, None, None)
-    if __name__ == "__main__":
-        main()
+if __name__ == "__main__":
+    main()
 # def generate(model, input_ids, device, eos_token_id, max_new_tokens=50, temperature=1.0):
 #     """Generate text samples from the model"""
 #     model.eval()
