@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from main import load_tokenizer, setup_device, cleanup_memory, decode_ids, compute_text_metrics
+from main import load_tokenizer, setup_device
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 import nltk
