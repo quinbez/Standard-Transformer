@@ -578,62 +578,62 @@ def main():
     if use_ddp and dist.is_initialized():
         dist.destroy_process_group()
 
-    return (model, test_loader, tokenizer, device, pad_token_id, eos_token_id) if rank == 0 else (None, None, None, None, None, None)
-    # if __name__ == "__main__":
-    #     main()
-def generate(model, input_ids, device, eos_token_id, max_new_tokens=50, temperature=1.0):
-    """Generate text samples from the model"""
-    model.eval()
-    input_tensor = input_ids.unsqueeze(0).to(device)  # Add batch dimension and move to device
+    # return (model, test_loader, tokenizer, device, pad_token_id, eos_token_id) if rank == 0 else (None, None, None, None, None, None)
+    if __name__ == "__main__":
+        main()
+# def generate(model, input_ids, device, eos_token_id, max_new_tokens=50, temperature=1.0):
+#     """Generate text samples from the model"""
+#     model.eval()
+#     input_tensor = input_ids.unsqueeze(0).to(device)  # Add batch dimension and move to device
 
-    for _ in range(max_new_tokens):
-        if input_tensor.size(1) > block_size:
-            input_tensor = input_tensor[:, -block_size:]
-        with torch.no_grad():
-            logits, _ = model(input_tensor)
-            logits = logits[:, -1, :] / temperature
-            probs = F.softmax(logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)
-            input_tensor = torch.cat((input_tensor, next_token), dim=1)
-        if next_token.item() == eos_token_id:
-            break
+#     for _ in range(max_new_tokens):
+#         if input_tensor.size(1) > block_size:
+#             input_tensor = input_tensor[:, -block_size:]
+#         with torch.no_grad():
+#             logits, _ = model(input_tensor)
+#             logits = logits[:, -1, :] / temperature
+#             probs = F.softmax(logits, dim=-1)
+#             next_token = torch.multinomial(probs, num_samples=1)
+#             input_tensor = torch.cat((input_tensor, next_token), dim=1)
+#         if next_token.item() == eos_token_id:
+#             break
 
-    return input_tensor[0].cpu()  # Move back to CPU for processing
-
-
-def run_generation_samples(model, test_loader, tokenizer, device, pad_token_id, eos_token_id):
-    """Run generation samples if we're on rank 0"""
-    for batch_idx, batch in enumerate(test_loader):
-        input_ids = batch["input_ids"]
-        target_ids = batch["target_ids"]
-        break
-
-    num_samples = 5
-    prompt_len = 4
-
-    for i in range(num_samples):
-        prompt_ids = input_ids[i][:prompt_len]
-        generated_ids = generate(model, prompt_ids, device, eos_token_id, max_new_tokens=50, temperature=0.7)
-
-        target_continuation = target_ids[i][prompt_len:]
-        target_continuation = target_continuation[target_continuation != pad_token_id].tolist()
-
-        generated_continuation = generated_ids[prompt_len:].tolist()
-
-        # Decode all
-        prompt_str = decode_ids(tokenizer, prompt_ids.tolist())
-        target_str = decode_ids(tokenizer, target_continuation, stop_at_eos=True)
-        predict_str = decode_ids(tokenizer, generated_continuation, stop_at_eos=True)
-
-        print(f"\n[Batch {batch_idx + 1}, Sample {i + 1}]")
-        print(f"[PROMPT ]: {prompt_str}")
-        print(f"[TARGET ]: {target_str}")
-        print(f"[PREDICT]: {predict_str}")
+#     return input_tensor[0].cpu()  # Move back to CPU for processing
 
 
-if __name__ == "__main__":
-    model, test_loader, tokenizer, device, pad_token_id, eos_token_id = main()
+# def run_generation_samples(model, test_loader, tokenizer, device, pad_token_id, eos_token_id):
+#     """Run generation samples if we're on rank 0"""
+#     for batch_idx, batch in enumerate(test_loader):
+#         input_ids = batch["input_ids"]
+#         target_ids = batch["target_ids"]
+#         break
 
-    # Run generation samples only on rank 0
-    if model is not None:
-        run_generation_samples(model, test_loader, tokenizer, device, pad_token_id, eos_token_id)
+#     num_samples = 5
+#     prompt_len = 4
+
+#     for i in range(num_samples):
+#         prompt_ids = input_ids[i][:prompt_len]
+#         generated_ids = generate(model, prompt_ids, device, eos_token_id, max_new_tokens=50, temperature=0.7)
+
+#         target_continuation = target_ids[i][prompt_len:]
+#         target_continuation = target_continuation[target_continuation != pad_token_id].tolist()
+
+#         generated_continuation = generated_ids[prompt_len:].tolist()
+
+#         # Decode all
+#         prompt_str = decode_ids(tokenizer, prompt_ids.tolist())
+#         target_str = decode_ids(tokenizer, target_continuation, stop_at_eos=True)
+#         predict_str = decode_ids(tokenizer, generated_continuation, stop_at_eos=True)
+
+#         print(f"\n[Batch {batch_idx + 1}, Sample {i + 1}]")
+#         print(f"[PROMPT ]: {prompt_str}")
+#         print(f"[TARGET ]: {target_str}")
+#         print(f"[PREDICT]: {predict_str}")
+
+
+# if __name__ == "__main__":
+#     model, test_loader, tokenizer, device, pad_token_id, eos_token_id = main()
+
+#     # Run generation samples only on rank 0
+#     if model is not None:
+#         run_generation_samples(model, test_loader, tokenizer, device, pad_token_id, eos_token_id)
