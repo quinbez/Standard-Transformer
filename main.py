@@ -384,12 +384,14 @@ def main():
     train_loader, valid_loader, test_loader = get_loaders(distributed=use_ddp)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-
+   
     start_training_time = time.time()
     
     rank = dist.get_rank() if dist.is_initialized() else 0
     if rank == 0:
         print("Starting training...")
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         print(f"{sum(p.numel() for p in model.parameters())/1e6:.5f} M parameters")
        
 
@@ -408,6 +410,8 @@ def main():
             print(f"Epoch {epoch + 1} completed | avg_train_loss {avg_loss:.4f} | avg_train_perplexity {avg_perplexity:.4f}")
 
     if rank == 0:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         total_training_time = time.time() - start_training_time
         print(f"Total Training Time: {total_training_time:.2f} seconds", flush=True)
         print("========== Training completed ==========", flush=True)
