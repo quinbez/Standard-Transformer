@@ -65,7 +65,6 @@ max_new_tokens = 50
 temperature = 1.0
 num_workers = 0
 
-
 # Directory setup
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__)) 
@@ -166,46 +165,7 @@ class PennTreebankDataset(Dataset):
         
         return {"input_ids": input_ids, "target_ids": target_ids}
 
-# def create_data_loaders(use_ddp=False):
-#     """Create data loaders with optional DDP support"""
-#     # Create datasets
-#     train_dataset = PennTreebankDataset("train_ids.pkl", TOKENIZER_DIR, MAX_LENGTH)
-#     val_dataset = PennTreebankDataset("valid_ids.pkl", TOKENIZER_DIR, MAX_LENGTH)
-#     test_dataset = PennTreebankDataset("test_ids.pkl", TOKENIZER_DIR, MAX_LENGTH)
 
-#     if use_ddp:
-#         from torch.utils.data.distributed import DistributedSampler
-#         train_sampler = DistributedSampler(train_dataset, shuffle=True)
-#         val_sampler = DistributedSampler(val_dataset, shuffle=False)
-#         test_sampler = DistributedSampler(test_dataset, shuffle=False)
-#         shuffle = False  # Don't shuffle when using DistributedSampler
-#     else:
-#         train_sampler = None
-#         val_sampler = None
-#         test_sampler = None
-#         shuffle = True
-
-#     train_loader = DataLoader(
-#         train_dataset,
-#         batch_size=batch_size,
-#         shuffle=shuffle,
-#         sampler=train_sampler,
-#         collate_fn=lambda batch: pad_collate_fn(batch, pad_token_id)
-#     )
-#     valid_loader = DataLoader(
-#         val_dataset,
-#         batch_size=batch_size,
-#         sampler=val_sampler,
-#         collate_fn=lambda batch: pad_collate_fn(batch, pad_token_id)
-#     )
-#     test_loader = DataLoader(
-#         test_dataset,
-#         batch_size=batch_size,
-#         sampler=test_sampler,
-#         collate_fn=lambda batch: pad_collate_fn(batch, pad_token_id)
-#     )
-
-#     return train_loader, valid_loader, test_loader
 def get_datasets():
     train_dataset = PennTreebankDataset("train_ids.pkl", TOKENIZER_DIR, MAX_LENGTH)
     valid_dataset = PennTreebankDataset("valid_ids.pkl", TOKENIZER_DIR, MAX_LENGTH)
@@ -377,9 +337,6 @@ def train(model, train_loader, optimizer, epoch, device):
     total_loss = 0
     total_batches = 0
 
-    # Get rank for distributed training
-    # rank = dist.get_rank() if dist.is_initialized() else 0
-
     for batch_idx, batch in enumerate(train_loader):
         xb = batch['input_ids'].to(device)
         yb = batch['target_ids'].to(device)
@@ -392,8 +349,6 @@ def train(model, train_loader, optimizer, epoch, device):
         total_loss += loss.item()
         total_batches += 1
 
-        # Only print from rank 0 in distributed training
-        # if rank == 0 and (batch_idx + 1) % 10 == 0:
         if (not dist.is_initialized() or dist.get_rank() == 0) and (batch_idx + 1) % 10 == 0:
             print(f"  Batch {batch_idx + 1}/{len(train_loader)} | train_loss {loss.item():.4f} | train_perplexity {torch.exp(loss).item():.4f}", flush=True)
 
@@ -404,6 +359,86 @@ def train(model, train_loader, optimizer, epoch, device):
     avg_perplexity = torch.exp(torch.tensor(avg_loss)).item()
     return avg_loss, avg_perplexity
 
+
+def main():
+    """Main training function with DDP support"""
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--flash', action='store_true', help='Enable FlashAttention (not implemented in this model)')
+    args = parser.parse_args()
+
+    # Setup device and DDP
+    local_rank, device, use_ddp = setup_device()
+
+    if use_ddp and not dist.is_initialized():
+        dist.init_process_group(backend="nccl")
+        
+    tokenizer = load_tokenizer()
+    vocab_size = tokenizer.get_vocab_size()
+    # Create model and move to device
+    model = LanguageModel(vocab_size=vocab_size).to(device)
+
+    # Wrap model with DDP if needed
+    if use_ddp:
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+    # Create data loaders
+    train_loader, valid_loader, test_loader = get_loaders(distributed=use_ddp)
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+
+    start_training_time = time.time()
+    
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    if rank == 0:
+        print("Starting training...")
+        print(f"{sum(p.numel() for p in model.parameters())/1e6:.5f} M parameters")
+       
+
+    for epoch in range(max_epochs):
+        # Set epoch for distributed sampler
+        if hasattr(train_loader, "sampler") and hasattr(train_loader.sampler, "set_epoch"):
+            train_loader.sampler.set_epoch(epoch)
+
+        if rank == 0:
+            print(f"\nEpoch {epoch + 1}/{max_epochs}")
+        
+        model.train()
+        avg_loss, avg_perplexity = train(model, train_loader, optimizer, epoch, device)
+
+        if rank == 0:
+            print(f"Epoch {epoch + 1} completed | avg_train_loss {avg_loss:.4f} | avg_train_perplexity {avg_perplexity:.4f}")
+
+    if rank == 0:
+        total_training_time = time.time() - start_training_time
+        print(f"Total Training Time: {total_training_time:.2f} seconds", flush=True)
+        print("========== Training completed ==========", flush=True)
+
+        # Save model
+        save_path = "checkpoints/gpt_backprop.pt"
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        if os.path.exists(save_path):
+            os.remove(save_path)
+
+        # Save the actual model state dict (unwrap DDP if needed)
+        model_state = model.module.state_dict() if use_ddp else model.state_dict()
+        torch.save({"model_state": model_state}, save_path)
+        print("Model saved.")
+
+        # Evaluate with metrics
+        # test_loss, test_perplexity = evaluate(model, test_loader, tokenizer, device, max_batches=10, compute_metrics=True)
+
+    # Clean up DDP
+    if use_ddp and dist.is_initialized():
+        dist.destroy_process_group()
+
+if __name__ == "__main__":
+    main()
+    
+    
+    
+    
+    
+    
+  
 
 # def compute_text_metrics(predictions, targets):
 #     print("\nComputing BERTScore and BLEU...")
@@ -479,109 +514,8 @@ def train(model, train_loader, optimizer, epoch, device):
 
 #     return avg_loss, avg_perplexity
 
-
-
-def main():
-    """Main training function with DDP support"""
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--flash', action='store_true', help='Enable FlashAttention (not implemented in this model)')
-    args = parser.parse_args()
-
-    # Setup device and DDP
-    local_rank, device, use_ddp = setup_device()
-
-    if use_ddp and not dist.is_initialized():
-        dist.init_process_group(backend="nccl")
-        
-    tokenizer = load_tokenizer()
-    vocab_size = tokenizer.get_vocab_size()
-
-    # Get rank for printing
-    # rank = dist.get_rank() if dist.is_initialized() else 0
-
-    # Initialize tokenizer only on rank 0, then broadcast or let others load
-    # if rank == 0:
-    #     # Initialize and train tokenizer (only on rank 0)
-    #     bpe = BPETokenizer()
-    #     bpe.train_and_save()
-
-    #     # Tokenize datasets (only on rank 0)
-    #     bpe.tokenize_and_save("train")
-    #     bpe.tokenize_and_save("valid")
-    #     bpe.tokenize_and_save("test")
-
-    # # Synchronize all processes
-    # if use_ddp:
-    #     dist.barrier()
-
-    # # Load tokenizer (all ranks)
-    # tokenizer = load_tokenizer()
-    # global vocab_size, pad_token_id, eos_token_id
-    # vocab_size = tokenizer.get_vocab_size()
-    # pad_token_id = tokenizer.token_to_id("[PAD]")
-    # eos_token_id = tokenizer.token_to_id("[EOS]")
-
-   
-
-    # Create model and move to device
-    model = LanguageModel(vocab_size=vocab_size).to(device)
-
-    # Wrap model with DDP if needed
-    if use_ddp:
-        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
-    # Create data loaders
-    train_loader, valid_loader, test_loader = get_loaders(distributed=use_ddp)
-
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-
-    start_training_time = time.time()
+  
     
-    rank = dist.get_rank() if dist.is_initialized() else 0
-    if rank == 0:
-        print("Starting training...")
-        print(f"{sum(p.numel() for p in model.parameters())/1e6:.5f} M parameters")
-       
-
-    for epoch in range(max_epochs):
-        # Set epoch for distributed sampler
-        if hasattr(train_loader, "sampler") and hasattr(train_loader.sampler, "set_epoch"):
-            train_loader.sampler.set_epoch(epoch)
-
-        if rank == 0:
-            print(f"\nEpoch {epoch + 1}/{max_epochs}")
-        
-        model.train()
-        avg_loss, avg_perplexity = train(model, train_loader, optimizer, epoch, device)
-
-        if rank == 0:
-            print(f"Epoch {epoch + 1} completed | avg_train_loss {avg_loss:.4f} | avg_train_perplexity {avg_perplexity:.4f}")
-
-    if rank == 0:
-        total_training_time = time.time() - start_training_time
-        print(f"Total Training Time: {total_training_time:.2f} seconds", flush=True)
-        print("========== Training completed ==========", flush=True)
-
-        # Save model
-        save_path = "checkpoints/gpt_backprop.pt"
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        if os.path.exists(save_path):
-            os.remove(save_path)
-
-        # Save the actual model state dict (unwrap DDP if needed)
-        model_state = model.module.state_dict() if use_ddp else model.state_dict()
-        torch.save({"model_state": model_state}, save_path)
-        print("Model saved.")
-
-        # Evaluate with metrics
-        # test_loss, test_perplexity = evaluate(model, test_loader, tokenizer, device, max_batches=10, compute_metrics=True)
-
-    # Clean up DDP
-    if use_ddp and dist.is_initialized():
-        dist.destroy_process_group()
-
-    # return (model, test_loader, tokenizer, device, pad_token_id, eos_token_id) if rank == 0 else (None, None, None, None, None, None)
-if __name__ == "__main__":
-    main()
 # def generate(model, input_ids, device, eos_token_id, max_new_tokens=50, temperature=1.0):
 #     """Generate text samples from the model"""
 #     model.eval()
