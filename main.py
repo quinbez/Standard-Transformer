@@ -13,7 +13,7 @@ from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
 from bert_score import score as bertscore
 import time
 import argparse
-nltk.download('punkt')
+# nltk.download('punkt')
 import os
 import gc
 import torch.distributed as dist
@@ -404,22 +404,22 @@ def train(model, train_loader, optimizer, epoch, device):
     return avg_loss, avg_perplexity
 
 
-def compute_text_metrics(predictions, targets):
-    print("\nComputing BERTScore and BLEU...")
-    P, R, F1 = bertscore(
-        predictions,
-        targets,
-        lang="en",
-        model_type="roberta-base",
-        rescale_with_baseline=True,
-    )
-    print(f"BERTScore (F1): {F1.mean().item():.4f}")
+# def compute_text_metrics(predictions, targets):
+#     print("\nComputing BERTScore and BLEU...")
+#     P, R, F1 = bertscore(
+#         predictions,
+#         targets,
+#         lang="en",
+#         model_type="roberta-base",
+#         rescale_with_baseline=True,
+#     )
+#     print(f"BERTScore (F1): {F1.mean().item():.4f}")
 
-    smooth_fn = SmoothingFunction().method4
-    tokenized_targets = [[target.split()] for target in targets]
-    tokenized_pred = [pred.split() for pred in predictions]
-    bleu = corpus_bleu(tokenized_targets, tokenized_pred, smoothing_function=smooth_fn)
-    print(f"BLEU Score: {bleu:.4f}")
+#     smooth_fn = SmoothingFunction().method4
+#     tokenized_targets = [[target.split()] for target in targets]
+#     tokenized_pred = [pred.split() for pred in predictions]
+#     bleu = corpus_bleu(tokenized_targets, tokenized_pred, smoothing_function=smooth_fn)
+#     print(f"BLEU Score: {bleu:.4f}")
 
 @torch.no_grad()
 def evaluate(model, test_loader, tokenizer, device, max_batches=None, compute_metrics=True):
