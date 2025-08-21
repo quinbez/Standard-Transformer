@@ -17,6 +17,8 @@ nltk.download('punkt')
 import os
 import gc
 import torch.distributed as dist
+from torch.utils.data import DataLoader, DistributedSampler
+from functools import partial
 
 def cleanup_memory():
     """Comprehensive memory cleanup"""
@@ -61,6 +63,7 @@ dropout = 0.1
 max_epochs = 20
 max_new_tokens = 50
 temperature = 1.0
+num_workers = 0
 
 
 # Directory setup
@@ -136,14 +139,7 @@ class BPETokenizer:
             pickle.dump(tokenized, f)
 
         print(f"Tokenized ptb.{subset_name}.txt and saved IDs to {output_path}")
-# Initialize and train tokenizer
-bpe = BPETokenizer()
-bpe.train_and_save()
-
-# Tokenize datasets
-bpe.tokenize_and_save("train")
-bpe.tokenize_and_save("valid")
-bpe.tokenize_and_save("test")        
+# Tokenizer initialization will be moved to main() function
 
 # Penn Treebank Dataset class
 class PennTreebankDataset(Dataset):
@@ -170,45 +166,94 @@ class PennTreebankDataset(Dataset):
         
         return {"input_ids": input_ids, "target_ids": target_ids}
 
-def create_data_loaders(use_ddp=False):
-    """Create data loaders with optional DDP support"""
-    # Create datasets
+# def create_data_loaders(use_ddp=False):
+#     """Create data loaders with optional DDP support"""
+#     # Create datasets
+#     train_dataset = PennTreebankDataset("train_ids.pkl", TOKENIZER_DIR, MAX_LENGTH)
+#     val_dataset = PennTreebankDataset("valid_ids.pkl", TOKENIZER_DIR, MAX_LENGTH)
+#     test_dataset = PennTreebankDataset("test_ids.pkl", TOKENIZER_DIR, MAX_LENGTH)
+
+#     if use_ddp:
+#         from torch.utils.data.distributed import DistributedSampler
+#         train_sampler = DistributedSampler(train_dataset, shuffle=True)
+#         val_sampler = DistributedSampler(val_dataset, shuffle=False)
+#         test_sampler = DistributedSampler(test_dataset, shuffle=False)
+#         shuffle = False  # Don't shuffle when using DistributedSampler
+#     else:
+#         train_sampler = None
+#         val_sampler = None
+#         test_sampler = None
+#         shuffle = True
+
+#     train_loader = DataLoader(
+#         train_dataset,
+#         batch_size=batch_size,
+#         shuffle=shuffle,
+#         sampler=train_sampler,
+#         collate_fn=lambda batch: pad_collate_fn(batch, pad_token_id)
+#     )
+#     valid_loader = DataLoader(
+#         val_dataset,
+#         batch_size=batch_size,
+#         sampler=val_sampler,
+#         collate_fn=lambda batch: pad_collate_fn(batch, pad_token_id)
+#     )
+#     test_loader = DataLoader(
+#         test_dataset,
+#         batch_size=batch_size,
+#         sampler=test_sampler,
+#         collate_fn=lambda batch: pad_collate_fn(batch, pad_token_id)
+#     )
+
+#     return train_loader, valid_loader, test_loader
+def get_datasets():
     train_dataset = PennTreebankDataset("train_ids.pkl", TOKENIZER_DIR, MAX_LENGTH)
     val_dataset = PennTreebankDataset("valid_ids.pkl", TOKENIZER_DIR, MAX_LENGTH)
     test_dataset = PennTreebankDataset("test_ids.pkl", TOKENIZER_DIR, MAX_LENGTH)
 
-    if use_ddp:
-        from torch.utils.data.distributed import DistributedSampler
-        train_sampler = DistributedSampler(train_dataset, shuffle=True)
-        val_sampler = DistributedSampler(val_dataset, shuffle=False)
+def get_loaders(distributed: bool = False):
+    tokenizer = load_tokenizer()
+    pad_token_id = tokenizer.token_to_id("[PAD]")
+    train_dataset, valid_dataset, test_dataset = get_datasets()
+
+    if distributed:
+        train_sampler = DistributedSampler(train_dataset)
+        valid_sampler = DistributedSampler(valid_dataset, shuffle=False)
         test_sampler = DistributedSampler(test_dataset, shuffle=False)
-        shuffle = False  # Don't shuffle when using DistributedSampler
     else:
-        train_sampler = None
-        val_sampler = None
-        test_sampler = None
-        shuffle = True
+        train_sampler = valid_sampler = test_sampler = None
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=shuffle,
         sampler=train_sampler,
-        collate_fn=lambda batch: pad_collate_fn(batch, pad_token_id)
+        shuffle=(train_sampler is None),
+        num_workers=num_workers,
+        pin_memory=True,
+        collate_fn=lambda batch: pad_collate_fn(batch, pad_token_id),
+        persistent_workers=num_workers > 0,
+        drop_last=True
     )
     valid_loader = DataLoader(
-        val_dataset,
+        valid_dataset,
         batch_size=batch_size,
-        sampler=val_sampler,
-        collate_fn=lambda batch: pad_collate_fn(batch, pad_token_id)
-    )
+        sampler=valid_sampler,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+        collate_fn=lambda batch: pad_collate_fn(batch, pad_token_id),
+        persistent_workers=num_workers > 0
+    )                     
     test_loader = DataLoader(
         test_dataset,
         batch_size=batch_size,
         sampler=test_sampler,
-        collate_fn=lambda batch: pad_collate_fn(batch, pad_token_id)
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+        collate_fn=lambda batch: pad_collate_fn(batch, pad_token_id),
+        persistent_workers=num_workers > 0
     )
-
     return train_loader, valid_loader, test_loader
 # Padding collate function
 def pad_collate_fn(batch, pad_token_id=0):
@@ -232,11 +277,10 @@ def load_tokenizer():
     return Tokenizer.from_file(tokenizer_path)
 
 
-# Load tokenizer
-tokenizer = load_tokenizer()
-vocab_size = tokenizer.get_vocab_size()
-pad_token_id = tokenizer.token_to_id("[PAD]")
-eos_token_id = tokenizer.token_to_id("[EOS]")
+# Global variables will be set in main() function
+vocab_size = None
+pad_token_id = None
+eos_token_id = None
 
 # Model architecture
 class Head(nn.Module):
@@ -300,7 +344,7 @@ class Block(nn.Module):
         return x
 
 class LanguageModel(nn.Module):
-    def __init__(self):
+    def __init__(self, vocab_size):
         super().__init__()
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
@@ -333,7 +377,7 @@ def train(model, train_loader, optimizer, epoch, device):
     total_batches = 0
 
     # Get rank for distributed training
-    rank = dist.get_rank() if dist.is_initialized() else 0
+    # rank = dist.get_rank() if dist.is_initialized() else 0
 
     for batch_idx, batch in enumerate(train_loader):
         xb = batch['input_ids'].to(device)
@@ -348,7 +392,8 @@ def train(model, train_loader, optimizer, epoch, device):
         total_batches += 1
 
         # Only print from rank 0 in distributed training
-        if rank == 0 and (batch_idx + 1) % 10 == 0:
+        # if rank == 0 and (batch_idx + 1) % 10 == 0:
+        if (not dist.is_initialized() or dist.get_rank() == 0) and (batch_idx + 1) % 10 == 0:
             print(f"  Batch {batch_idx + 1}/{len(train_loader)} | train_loss {loss.item():.4f} | train_perplexity {torch.exp(loss).item():.4f}", flush=True)
 
         # Clean up memory
@@ -446,32 +491,55 @@ def main():
 
     if use_ddp and not dist.is_initialized():
         dist.init_process_group(backend="nccl")
+        
+    tokenizer = load_tokenizer()
+    vocab_size = tokenizer.get_vocab_size()
 
     # Get rank for printing
-    rank = dist.get_rank() if dist.is_initialized() else 0
+    # rank = dist.get_rank() if dist.is_initialized() else 0
 
-    # Load tokenizer
-    tokenizer = load_tokenizer()
+    # Initialize tokenizer only on rank 0, then broadcast or let others load
+    # if rank == 0:
+    #     # Initialize and train tokenizer (only on rank 0)
+    #     bpe = BPETokenizer()
+    #     bpe.train_and_save()
 
-    # Create data loaders
-    train_loader, valid_loader, test_loader = create_data_loaders(use_ddp=use_ddp)
+    #     # Tokenize datasets (only on rank 0)
+    #     bpe.tokenize_and_save("train")
+    #     bpe.tokenize_and_save("valid")
+    #     bpe.tokenize_and_save("test")
+
+    # # Synchronize all processes
+    # if use_ddp:
+    #     dist.barrier()
+
+    # # Load tokenizer (all ranks)
+    # tokenizer = load_tokenizer()
+    # global vocab_size, pad_token_id, eos_token_id
+    # vocab_size = tokenizer.get_vocab_size()
+    # pad_token_id = tokenizer.token_to_id("[PAD]")
+    # eos_token_id = tokenizer.token_to_id("[EOS]")
+
+   
 
     # Create model and move to device
     model = LanguageModel().to(device)
 
-    if rank == 0:
-        print(f"Model parameters: {sum(p.numel() for p in model.parameters())/1e6:.2f}M")
-
     # Wrap model with DDP if needed
     if use_ddp:
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+    # Create data loaders
+    train_loader, valid_loader, test_loader = get_loaders(distributed=use_ddp)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
+    start_training_time = time.time()
+    
+    rank = dist.get_rank() if dist.is_initialized() else 0
     if rank == 0:
         print("Starting training...")
-
-    start_training_time = time.time()
+        print(f"{sum(p.numel() for p in model.parameters())/1e6:.5f} M parameters")
+       
 
     for epoch in range(max_epochs):
         # Set epoch for distributed sampler
@@ -480,7 +548,8 @@ def main():
 
         if rank == 0:
             print(f"\nEpoch {epoch + 1}/{max_epochs}")
-
+        
+        model.train()
         avg_loss, avg_perplexity = train(model, train_loader, optimizer, epoch, device)
 
         if rank == 0:
@@ -503,15 +572,16 @@ def main():
         print("Model saved.")
 
         # Evaluate with metrics
-        test_loss, test_perplexity = evaluate(model, test_loader, tokenizer, device, max_batches=10, compute_metrics=True)
+        # test_loss, test_perplexity = evaluate(model, test_loader, tokenizer, device, max_batches=10, compute_metrics=True)
 
     # Clean up DDP
     if use_ddp and dist.is_initialized():
         dist.destroy_process_group()
 
-    return model, test_loader, tokenizer, device if rank == 0 else (None, None, None, None)
-
-def generate(model, input_ids, device, max_new_tokens=50, temperature=1.0):
+    # return (model, test_loader, tokenizer, device, pad_token_id, eos_token_id) if rank == 0 else (None, None, None, None, None, None)
+    if __name__ == "__main__":
+        main()
+def generate(model, input_ids, device, eos_token_id, max_new_tokens=50, temperature=1.0):
     """Generate text samples from the model"""
     model.eval()
     input_tensor = input_ids.unsqueeze(0).to(device)  # Add batch dimension and move to device
@@ -531,7 +601,7 @@ def generate(model, input_ids, device, max_new_tokens=50, temperature=1.0):
     return input_tensor[0].cpu()  # Move back to CPU for processing
 
 
-def run_generation_samples(model, test_loader, tokenizer, device):
+def run_generation_samples(model, test_loader, tokenizer, device, pad_token_id, eos_token_id):
     """Run generation samples if we're on rank 0"""
     for batch_idx, batch in enumerate(test_loader):
         input_ids = batch["input_ids"]
@@ -543,7 +613,7 @@ def run_generation_samples(model, test_loader, tokenizer, device):
 
     for i in range(num_samples):
         prompt_ids = input_ids[i][:prompt_len]
-        generated_ids = generate(model, prompt_ids, device, max_new_tokens=50, temperature=0.7)
+        generated_ids = generate(model, prompt_ids, device, eos_token_id, max_new_tokens=50, temperature=0.7)
 
         target_continuation = target_ids[i][prompt_len:]
         target_continuation = target_continuation[target_continuation != pad_token_id].tolist()
@@ -562,8 +632,8 @@ def run_generation_samples(model, test_loader, tokenizer, device):
 
 
 if __name__ == "__main__":
-    model, test_loader, tokenizer, device = main()
+    model, test_loader, tokenizer, device, pad_token_id, eos_token_id = main()
 
     # Run generation samples only on rank 0
     if model is not None:
-        run_generation_samples(model, test_loader, tokenizer, device)
+        run_generation_samples(model, test_loader, tokenizer, device, pad_token_id, eos_token_id)
