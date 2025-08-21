@@ -20,13 +20,44 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
 from functools import partial
 
+def load_model(model_path,vocab_size):
+    """
+    Load a PCTransformer model from a checkpoint file.
+
+    Args:
+        model_path (str): Path to the saved model checkpoint.
+        config: Model configuration object.
+    Returns:
+        PCTransformer: The loaded model with weights.
+    """
+    model = LanguageModel(vocab_size)
+    model.load_state_dict(torch.load(model_path), strict = False)
+    return model
+
 def cleanup_memory():
     """Comprehensive memory cleanup"""
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
+        
+def compute_text_metrics(predictions, targets):
+    print("\nComputing BERTScore and BLEU...")
+    P, R, F1 = bertscore(
+        predictions,
+        targets,
+        lang="en",
+        model_type="roberta-base",
+        rescale_with_baseline=True,
+    )
+    print(f"BERTScore (F1): {F1.mean().item():.4f}")
 
+    smooth_fn = SmoothingFunction().method4
+    tokenized_targets = [[target.split()] for target in targets]
+    tokenized_pred = [pred.split() for pred in predictions]
+    bleu = corpus_bleu(tokenized_targets, tokenized_pred, smoothing_function=smooth_fn)
+    print(f"BLEU Score: {bleu:.4f}")
+    
 def setup_device():
     """Setup device for training with optional DDP support"""
     if "WORLD_SIZE" in os.environ and torch.cuda.is_available():
@@ -63,7 +94,7 @@ dropout = 0.1
 max_epochs = 2
 max_new_tokens = 50
 temperature = 1.0
-num_workers = 8
+num_workers = 0
 
 # Directory setup
 
@@ -405,6 +436,7 @@ def main():
         
         model.train()
         avg_loss, avg_perplexity = train(model, train_loader, optimizer, epoch, device)
+        
 
         if rank == 0:
             print(f"Epoch {epoch + 1} completed | avg_train_loss {avg_loss:.4f} | avg_train_perplexity {avg_perplexity:.4f}")
@@ -417,7 +449,7 @@ def main():
         print("========== Training completed ==========", flush=True)
 
         # Save model
-        save_path = "checkpoints/gpt_backprop.pt"
+        save_path = "checkpoints/final_model.pt"
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         if os.path.exists(save_path):
             os.remove(save_path)
@@ -436,8 +468,55 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
-    
+
+# @torch.no_grad()
+# def evaluate(model, test_loader, tokenizer, max_batches=None, compute_metrics=True):
+#     start_time = time.time()
+#     model.eval()
+#     total_loss = 0
+#     total_batches = 0
+#     pad_token_id = tokenizer.token_to_id("[PAD]")
+#     decoded_targets, decoded_predictions = [], []
+#     if max_batches is None:
+#         print(f"Evaluating on the full test set...")
+#     else:
+#         print(f"Evaluating on up to {max_batches} batches...")
+
+#     for batch_idx, batch in enumerate(test_loader):
+#         if max_batches is not None and batch_idx >= max_batches:
+#             break
+
+#         input_ids = batch['input_ids']
+#         targets = batch['target_ids']
+
+#         # Compute loss
+#         logits, loss = model(input_ids, targets)
+#         total_loss += loss.item()
+#         total_batches += 1
+
+#         if compute_metrics:
+#              preds = torch.argmax(logits, dim=-1)
+#              mask = targets != pad_token_id
+#              for i in range(preds.size(0)):
+#                 pred_str = decode_ids(tokenizer, preds[i][mask[i]].tolist(), stop_at_eos=True)
+#                 tgt_str = decode_ids(tokenizer, targets[i][mask[i]].tolist(), stop_at_eos=True)
+#                 decoded_predictions.append(pred_str)
+#                 decoded_targets.append(tgt_str)
+
+           
+#     if compute_metrics and decoded_predictions and decoded_targets:
+#         compute_text_metrics(decoded_predictions, decoded_targets)
+           
+
+#     # Compute average loss and perplexity
+#     avg_loss = total_loss / total_batches if total_batches > 0 else float('inf')
+#     avg_perplexity = torch.exp(torch.tensor(avg_loss)).item() if avg_loss != float('inf') else float('inf')
+#     elapsed = time.time() - start_time
+#     print(f"Evaluation completed in {elapsed:.2f} seconds")
+#     print(f"Total Batches Processed: {batch_idx + 1}")
+#     print(f"Avg Test CE Loss: {avg_loss:.4f} | Avg Test Perplexity: {avg_perplexity:.4f}")
+#     return avg_loss,avg_perplexity
+
     
     
     
