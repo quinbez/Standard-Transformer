@@ -60,10 +60,10 @@ n_embd = 64
 n_head = 8
 n_layer = 4
 dropout = 0.1
-max_epochs = 20
+max_epochs = 2
 max_new_tokens = 50
 temperature = 1.0
-num_workers = 8
+num_workers = 0
 
 
 # Directory setup
@@ -208,8 +208,9 @@ class PennTreebankDataset(Dataset):
 #     return train_loader, valid_loader, test_loader
 def get_datasets():
     train_dataset = PennTreebankDataset("train_ids.pkl", TOKENIZER_DIR, MAX_LENGTH)
-    val_dataset = PennTreebankDataset("valid_ids.pkl", TOKENIZER_DIR, MAX_LENGTH)
+    valid_dataset = PennTreebankDataset("valid_ids.pkl", TOKENIZER_DIR, MAX_LENGTH)
     test_dataset = PennTreebankDataset("test_ids.pkl", TOKENIZER_DIR, MAX_LENGTH)
+    return train_dataset, valid_dataset, test_dataset
 
 def get_loaders(distributed: bool = False):
     tokenizer = load_tokenizer()
@@ -229,7 +230,7 @@ def get_loaders(distributed: bool = False):
         sampler=train_sampler,
         shuffle=(train_sampler is None),
         num_workers=num_workers,
-        pin_memory=True,
+        pin_memory=False,
         collate_fn=lambda batch: pad_collate_fn(batch, pad_token_id),
         persistent_workers=num_workers > 0,
         drop_last=True
@@ -240,7 +241,7 @@ def get_loaders(distributed: bool = False):
         sampler=valid_sampler,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=True,
+        pin_memory=False,
         collate_fn=lambda batch: pad_collate_fn(batch, pad_token_id),
         persistent_workers=num_workers > 0
     )                     
@@ -250,7 +251,7 @@ def get_loaders(distributed: bool = False):
         sampler=test_sampler,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=True,
+        pin_memory=False,
         collate_fn=lambda batch: pad_collate_fn(batch, pad_token_id),
         persistent_workers=num_workers > 0
     )
@@ -344,7 +345,7 @@ class Block(nn.Module):
         return x
 
 class LanguageModel(nn.Module):
-    def __init__(self):
+    def __init__(self,vocab_size):
         super().__init__()
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
@@ -421,62 +422,62 @@ def train(model, train_loader, optimizer, epoch, device):
 #     bleu = corpus_bleu(tokenized_targets, tokenized_pred, smoothing_function=smooth_fn)
 #     print(f"BLEU Score: {bleu:.4f}")
 
-@torch.no_grad()
-def evaluate(model, test_loader, tokenizer, device, max_batches=None, compute_metrics=True):
-    start_time = time.time()
-    model.eval()
-    total_loss = 0
-    total_batches = 0
-    pad_token_id = tokenizer.token_to_id("[PAD]")
-    decoded_targets, decoded_predictions = [], []
+# @torch.no_grad()
+# def evaluate(model, test_loader, tokenizer, device, max_batches=None, compute_metrics=True):
+#     start_time = time.time()
+#     model.eval()
+#     total_loss = 0
+#     total_batches = 0
+#     pad_token_id = tokenizer.token_to_id("[PAD]")
+#     decoded_targets, decoded_predictions = [], []
 
-    # Get rank for distributed training
-    rank = dist.get_rank() if dist.is_initialized() else 0
+#     # Get rank for distributed training
+#     rank = dist.get_rank() if dist.is_initialized() else 0
 
-    if rank == 0:
-        if max_batches is None:
-            print(f"Evaluating on the full test set...")
-        else:
-            print(f"Evaluating on up to {max_batches} batches...")
+#     if rank == 0:
+#         if max_batches is None:
+#             print(f"Evaluating on the full test set...")
+#         else:
+#             print(f"Evaluating on up to {max_batches} batches...")
 
-    for batch_idx, batch in enumerate(test_loader):
-        if max_batches is not None and batch_idx >= max_batches:
-            break
+#     for batch_idx, batch in enumerate(test_loader):
+#         if max_batches is not None and batch_idx >= max_batches:
+#             break
 
-        input_ids = batch['input_ids'].to(device)
-        targets = batch['target_ids'].to(device)
+#         input_ids = batch['input_ids'].to(device)
+#         targets = batch['target_ids'].to(device)
 
-        # Compute loss
-        logits, loss = model(input_ids, targets)
-        total_loss += loss.item()
-        total_batches += 1
+#         # Compute loss
+#         logits, loss = model(input_ids, targets)
+#         total_loss += loss.item()
+#         total_batches += 1
 
-        if compute_metrics:
-             preds = torch.argmax(logits, dim=-1)
-             mask = targets != pad_token_id
-             for i in range(preds.size(0)):
-                pred_str = decode_ids(tokenizer, preds[i][mask[i]].cpu().tolist(), stop_at_eos=True)
-                tgt_str = decode_ids(tokenizer, targets[i][mask[i]].cpu().tolist(), stop_at_eos=True)
-                decoded_predictions.append(pred_str)
-                decoded_targets.append(tgt_str)
+#         if compute_metrics:
+#              preds = torch.argmax(logits, dim=-1)
+#              mask = targets != pad_token_id
+#              for i in range(preds.size(0)):
+#                 pred_str = decode_ids(tokenizer, preds[i][mask[i]].cpu().tolist(), stop_at_eos=True)
+#                 tgt_str = decode_ids(tokenizer, targets[i][mask[i]].cpu().tolist(), stop_at_eos=True)
+#                 decoded_predictions.append(pred_str)
+#                 decoded_targets.append(tgt_str)
 
-        # Clean up memory
-        cleanup_memory()
+#         # Clean up memory
+#         cleanup_memory()
 
-    if rank == 0 and compute_metrics and decoded_predictions and decoded_targets:
-        compute_text_metrics(decoded_predictions, decoded_targets)
+#     if rank == 0 and compute_metrics and decoded_predictions and decoded_targets:
+#         compute_text_metrics(decoded_predictions, decoded_targets)
 
-    # Compute average loss and perplexity
-    avg_loss = total_loss / total_batches if total_batches > 0 else float('inf')
-    avg_perplexity = torch.exp(torch.tensor(avg_loss)).item() if avg_loss != float('inf') else float('inf')
+#     # Compute average loss and perplexity
+#     avg_loss = total_loss / total_batches if total_batches > 0 else float('inf')
+#     avg_perplexity = torch.exp(torch.tensor(avg_loss)).item() if avg_loss != float('inf') else float('inf')
 
-    if rank == 0:
-        elapsed = time.time() - start_time
-        print(f"Evaluation completed in {elapsed:.2f} seconds")
-        print(f"Total Batches Processed: {batch_idx + 1}")
-        print(f"Avg Test CE Loss: {avg_loss:.4f} | Avg Test Perplexity: {avg_perplexity:.4f}")
+#     if rank == 0:
+#         elapsed = time.time() - start_time
+#         print(f"Evaluation completed in {elapsed:.2f} seconds")
+#         print(f"Total Batches Processed: {batch_idx + 1}")
+#         print(f"Avg Test CE Loss: {avg_loss:.4f} | Avg Test Perplexity: {avg_perplexity:.4f}")
 
-    return avg_loss, avg_perplexity
+#     return avg_loss, avg_perplexity
 
 
 
@@ -523,7 +524,7 @@ def main():
    
 
     # Create model and move to device
-    model = LanguageModel().to(device)
+    model = LanguageModel(vocab_size=vocab_size).to(device)
 
     # Wrap model with DDP if needed
     if use_ddp:
