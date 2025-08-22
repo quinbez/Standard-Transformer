@@ -9,11 +9,8 @@ import os
 import pickle
 import json
 import nltk
-from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
-from bert_score import score as bertscore
 import time
 import argparse
-# nltk.download('punkt')
 import os
 import gc
 import torch.distributed as dist
@@ -21,8 +18,20 @@ from torch.utils.data import DataLoader, DistributedSampler
 from functools import partial
 from utils.model_utils import *
 
-# Hyperparameters
+def load_model(model_path,vocab_size):
+    """
+    Load a PCTransformer model from a checkpoint file.
 
+    Args:
+        model_path (str): Path to the saved model checkpoint.
+        config: Model configuration object.
+    Returns:
+        PCTransformer: The loaded model with weights.
+    """
+    model = LanguageModel(vocab_size)
+    model.load_state_dict(torch.load(model_path), strict = False)
+    return model
+# Hyperparameters
 batch_size = 64
 block_size = 256
 MAX_LENGTH = 64

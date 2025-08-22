@@ -13,22 +13,9 @@ import nltk
 from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
 from bert_score import score as bertscore
 import argparse
-from training import LanguageModel
+from training import load_model
 from utils.model_utils import *
 
-def load_model(model_path,vocab_size):
-    """
-    Load a PCTransformer model from a checkpoint file.
-
-    Args:
-        model_path (str): Path to the saved model checkpoint.
-        config: Model configuration object.
-    Returns:
-        PCTransformer: The loaded model with weights.
-    """
-    model = LanguageModel(vocab_size)
-    model.load_state_dict(torch.load(model_path), strict = False)
-    return model
 
 local_rank, device, use_ddp = setup_device()
 @torch.no_grad()

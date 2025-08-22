@@ -3,26 +3,10 @@ import gc
 import os
 from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
 from bert_score import score as bertscore
-from training import LanguageModel
 from tokenizers import Tokenizer
 from training import TOKENIZER_DIR
 from torch.nn.utils.rnn import pad_sequence
 
-
-
-def load_model(model_path,vocab_size):
-    """
-    Load a PCTransformer model from a checkpoint file.
-
-    Args:
-        model_path (str): Path to the saved model checkpoint.
-        config: Model configuration object.
-    Returns:
-        PCTransformer: The loaded model with weights.
-    """
-    model = LanguageModel(vocab_size)
-    model.load_state_dict(torch.load(model_path), strict = False)
-    return model
 
 def cleanup_memory():
     """Comprehensive memory cleanup"""
