@@ -1,20 +1,20 @@
 import time
 import math
 import torch
-from main import get_loaders
+from training import get_loaders
 import torch.nn.functional as F
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from main import load_tokenizer, setup_device
+from training import load_tokenizer, setup_device
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 import nltk
 from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
 from bert_score import score as bertscore
 import argparse
-
-from main import LanguageModel
+from training import LanguageModel
+from utils.model_utils import *
 
 def load_model(model_path,vocab_size):
     """
@@ -60,22 +60,7 @@ def evaluate(model, test_loader, tokenizer, max_batches=None,device=None):
         
         if (not dist.is_initialized() or dist.get_rank() == 0) and (batch_idx + 1) % 10 == 0:
              print(f"  Batch {batch_idx + 1}/{len(test_loader)} | train_loss {loss.item():.4f} | train_perplexity {torch.exp(loss).item():.4f}", flush=True)
-
-
-    #     if compute_metrics:
-    #          preds = torch.argmax(logits, dim=-1)
-    #          mask = targets != pad_token_id
-    #          for i in range(preds.size(0)):
-    #             pred_str = decode_ids(tokenizer, preds[i][mask[i]].tolist(), stop_at_eos=True)
-    #             tgt_str = decode_ids(tokenizer, targets[i][mask[i]].tolist(), stop_at_eos=True)
-    #             decoded_predictions.append(pred_str)
-    #             decoded_targets.append(tgt_str)
-
            
-    # if compute_metrics and decoded_predictions and decoded_targets:
-    #     compute_text_metrics(decoded_predictions, decoded_targets)
-           
-
     # Compute average loss and perplexity
     avg_loss = total_loss / total_batches if total_batches > 0 else float('inf')
     avg_perplexity = torch.exp(torch.tensor(avg_loss)).item() if avg_loss != float('inf') else float('inf')
@@ -130,23 +115,3 @@ def main():
 if __name__ == "__main__":
     main() 
 
-
-
-  
-
-# def compute_text_metrics(predictions, targets):
-#     print("\nComputing BERTScore and BLEU...")
-#     P, R, F1 = bertscore(
-#         predictions,
-#         targets,
-#         lang="en",
-#         model_type="roberta-base",
-#         rescale_with_baseline=True,
-#     )
-#     print(f"BERTScore (F1): {F1.mean().item():.4f}")
-
-#     smooth_fn = SmoothingFunction().method4
-#     tokenized_targets = [[target.split()] for target in targets]
-#     tokenized_pred = [pred.split() for pred in predictions]
-#     bleu = corpus_bleu(tokenized_targets, tokenized_pred, smoothing_function=smooth_fn)
-#     print(f"BLEU Score: {bleu:.4f}")
