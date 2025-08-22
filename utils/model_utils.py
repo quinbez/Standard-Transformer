@@ -4,7 +4,6 @@ import os
 from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
 from bert_score import score as bertscore
 from tokenizers import Tokenizer
-from training import TOKENIZER_DIR
 from torch.nn.utils.rnn import pad_sequence
 
 
@@ -70,7 +69,3 @@ def decode_ids(tokenizer, ids, stop_at_eos = True):
         text = text.split("[EOS]")[0].strip()
     return text
 
-# Load tokenizer function
-def load_tokenizer():
-    tokenizer_path = os.path.join(TOKENIZER_DIR, "tokenizer.json")
-    return Tokenizer.from_file(tokenizer_path)

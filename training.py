@@ -31,6 +31,8 @@ def load_model(model_path,vocab_size):
     model = LanguageModel(vocab_size)
     model.load_state_dict(torch.load(model_path), strict = False)
     return model
+
+
 # Hyperparameters
 batch_size = 64
 block_size = 256
@@ -144,7 +146,10 @@ class PennTreebankDataset(Dataset):
         target_ids = torch.tensor(seq[1:][:self.block_size], dtype=torch.long)
         
         return {"input_ids": input_ids, "target_ids": target_ids}
-
+# Load tokenizer function
+def load_tokenizer():
+    tokenizer_path = os.path.join(TOKENIZER_DIR, "tokenizer.json")
+    return Tokenizer.from_file(tokenizer_path)
 
 def get_datasets():
     train_dataset = PennTreebankDataset("train_ids.pkl", TOKENIZER_DIR, MAX_LENGTH)
@@ -386,9 +391,6 @@ def main():
         model_state = model.module.state_dict() if use_ddp else model.state_dict()
         torch.save({"model_state": model_state}, save_path)
         print("Model saved.")
-
-        # Evaluate with metrics
-        # test_loss, test_perplexity = evaluate(model, test_loader, tokenizer, device, max_batches=10, compute_metrics=True)
 
     # Clean up DDP
     if use_ddp and dist.is_initialized():
