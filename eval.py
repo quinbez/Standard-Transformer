@@ -1,21 +1,15 @@
-import time
-import math
-import torch
-from training import get_loaders
-import torch.nn.functional as F
-import sys
 import os
+import sys
+import time
+import torch
+import argparse
+from training import get_loaders
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from training import load_tokenizer, setup_device
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
-import nltk
-from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
-from bert_score import score as bertscore
-import argparse
 from training import load_model
 from utils.model_utils import *
-
 
 local_rank, device, use_ddp = setup_device()
 @torch.no_grad()
@@ -24,8 +18,6 @@ def evaluate(model, test_loader, tokenizer, max_batches=None,device=None):
     model.eval()
     total_loss = 0
     total_batches = 0
-    pad_token_id = tokenizer.token_to_id("[PAD]")
-    decoded_targets, decoded_predictions = [], []
     
     if not dist.is_initialized() or dist.get_rank() == 0:
         if max_batches is None:
@@ -56,7 +48,6 @@ def evaluate(model, test_loader, tokenizer, max_batches=None,device=None):
     print(f"Total Batches Processed: {batch_idx + 1}")
     print(f"Avg Test CE Loss: {avg_loss:.4f} | Avg Test Perplexity: {avg_perplexity:.4f}")
     return avg_loss,avg_perplexity
-
     
 def main():
     """
@@ -75,7 +66,6 @@ def main():
     tokenizer = load_tokenizer()
     vocab_size = tokenizer.get_vocab_size()
     
-
     model_path = "checkpoints/final_model.pt"
     checkpoint = torch.load(model_path, map_location=device)
     model = load_model(model_path,vocab_size).to(device)
