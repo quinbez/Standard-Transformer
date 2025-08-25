@@ -112,7 +112,7 @@ def main():
     print(f"[Rank {local_rank}] Using device: {device}")
 
     tokenizer = load_tokenizer()
-    vocab_size = tokenizer.get_vocab_size()
+    vocab_size = len(tokenizer)
 
 
     model_path = "checkpoints/final_model.pt"
