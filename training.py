@@ -1,22 +1,13 @@
-import torch
-import torch.nn as nn
-from torch.nn import functional as F
-from torch.utils.data import Dataset, DataLoader, Subset
-from torch.nn.utils.rnn import pad_sequence
-from torch.nn.parallel import DistributedDataParallel as DDP
-from tokenizers import Tokenizer, models, trainers, pre_tokenizers
 import os
-import pickle
-import json
-import nltk
 import time
+import torch
 import argparse
-import os
-import gc
-import torch.distributed as dist
-from torch.utils.data import DataLoader, DistributedSampler
-from functools import partial
 from utils.model_utils import *
+import torch.distributed as dist
+from model_architecture.config import GPTConfig
+from model_architecture.model import LanguageModel
+from torch.nn.parallel import DistributedDataParallel as DDP
+
 from data_preparation.config import Config
 from transformers import GPT2TokenizerFast
 
@@ -321,6 +312,7 @@ class LanguageModel(nn.Module):
         return logits, loss
 
 
+
 # Training function
 def train(model, train_loader, optimizer, epoch, device, tokenizer=None):
     model.train()
@@ -377,8 +369,10 @@ def train(model, train_loader, optimizer, epoch, device, tokenizer=None):
     avg_perplexity = torch.exp(torch.tensor(avg_loss)).item()
     # tokens_per_second = total_tokens / elapsed_time if elapsed_time > 0 else 0
 
+
     # return avg_loss, avg_perplexity, tokens_per_second, total_tokens, elapsed_time
     return avg_loss, avg_perplexity
+
 
 def main():
     """Main training function with DDP support"""
@@ -393,40 +387,47 @@ def main():
         dist.init_process_group(backend="nccl")
         
     tokenizer = load_tokenizer()
-    # vocab_size = tokenizer.get_vocab_size()
+
     vocab_size = len(tokenizer)
+    
+    # vocab_size = tokenizer.get_vocab_size()
+
     # Create model and move to device
     model = LanguageModel(vocab_size=vocab_size).to(device)
 
     # Wrap model with DDP if needed
     if use_ddp:
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+    
     # Create data loaders
     train_loader, _, _ = get_loaders(distributed=use_ddp)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=GPTConfig.learning_rate)
    
     start_training_time = time.time()
     
     rank = dist.get_rank() if dist.is_initialized() else 0
     if rank == 0:
-        print("Starting training...")
+        print("========== Starting training ==========")
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         print(f"{sum(p.numel() for p in model.parameters())/1e6:.5f} M parameters")
        
-
-    for epoch in range(max_epochs):
+    for epoch in range(GPTConfig.max_epochs):
         # Set epoch for distributed sampler
         if hasattr(train_loader, "sampler") and hasattr(train_loader.sampler, "set_epoch"):
             train_loader.sampler.set_epoch(epoch)
 
         if rank == 0:
-            print(f"\nEpoch {epoch + 1}/{max_epochs}")
+            print(f"\nEpoch {epoch + 1}/{GPTConfig.max_epochs}")
         
         model.train()
+
+        avg_loss, avg_perplexity = train(model, train_loader, optimizer, epoch, device)
+   
             # avg_loss, avg_perplexity, throughput, total_tokens, epoch_time = train(model, train_loader, optimizer, epoch, device, tokenizer)
         avg_loss, avg_perplexity = train(model, train_loader, optimizer, epoch, device, tokenizer)
+
 
         if rank == 0:
     #         print(f"Epoch {epoch + 1} completed | avg_train_loss {avg_loss:.4f} | avg_train_perplexity {avg_perplexity:.4f} | throughput {throughput:.0f} tokens/sec | tokens {total_tokens:,} | time {epoch_time:.1f}s")

@@ -6,21 +6,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 import argparse
 from utils.model_utils import *
-
-
-# Hyperparameters
-batch_size = 64
-block_size = 256
-MAX_LENGTH = 64
-learning_rate = 1e-5
-n_embd = 64
-n_head = 8
-n_layer = 4
-dropout = 0.1
-max_epochs = 2
-max_new_tokens = 50
-temperature = 1.0
-num_workers = 0
+from model_architecture.config import GPTConfig
 
 local_rank, device, use_ddp = setup_device()
 
@@ -29,12 +15,12 @@ def generate(model, input_ids, eos_token_id, max_new_tokens=50, temperature=1.0,
     model.eval()
     input_tensor = input_ids.unsqueeze(0).to(device)  # Add batch dimension and move to device
 
-    for _ in range(max_new_tokens):
-        if input_tensor.size(1) > block_size:
-            input_tensor = input_tensor[:, -block_size:]
+    for _ in range(GPTConfig.max_new_tokens):
+        if input_tensor.size(1) > GPTConfig.block_size:
+            input_tensor = input_tensor[:, -GPTConfig.block_size:]
         with torch.no_grad():
             logits, _ = model(input_tensor)
-            logits = logits[:, -1, :] / temperature
+            logits = logits[:, -1, :] / GPTConfig.temperature
             probs = F.softmax(logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)
             input_tensor = torch.cat((input_tensor, next_token), dim=1)
@@ -42,6 +28,7 @@ def generate(model, input_ids, eos_token_id, max_new_tokens=50, temperature=1.0,
             break
 
     return input_tensor[0] 
+
 def text_generation(model, device=None, prompt=None, max_new_tokens=50, temperature=1.0):
     """
     Run text generation for a batch of prompts or a user-provided prompt and print results.
@@ -68,7 +55,7 @@ def text_generation(model, device=None, prompt=None, max_new_tokens=50, temperat
     if prompt is not None:
         # Encode the prompt and generate text
         input_ids = torch.tensor(tokenizer.encode(prompt).ids, dtype=torch.long).to(device)
-        generated_ids = generate(model, input_ids, eos_token_id, max_new_tokens=max_new_tokens, temperature=temperature, device=device)
+        generated_ids = generate(model, input_ids, eos_token_id, max_new_tokens=GPTConfig.max_new_tokens, temperature=GPTConfig.temperature, device=device)
         prompt_len = len(input_ids)
         generated_continuation = generated_ids[prompt_len:].tolist()
         generated_str = decode_ids(tokenizer, generated_continuation, stop_at_eos=True)
@@ -77,15 +64,18 @@ def text_generation(model, device=None, prompt=None, max_new_tokens=50, temperat
         decoded_preds.append(generated_str)
         decoded_targets.append("")
         return decoded_preds, decoded_targets
+    
     else:
         num_samples = 5
         prompt_len = 5
         _, _, test_loader = get_loaders(distributed=use_ddp)
+        
         for batch_idx, batch in enumerate(test_loader):
             input_ids = batch["input_ids"].to(device)
+            
             for i in range(min(num_samples, input_ids.size(0))):
                 prompt_ids = input_ids[i][:prompt_len]
-                generated_ids = generate(model, prompt_ids,eos_token_id, max_new_tokens=max_new_tokens, temperature=temperature, device=device)
+                generated_ids = generate(model, prompt_ids,eos_token_id, max_new_tokens=GPTConfig.max_new_tokens, temperature=GPTConfig.temperature, device=device)
                 target_continuation = input_ids[i][prompt_len:]
                 target_continuation = target_continuation[target_continuation != pad_token_id].tolist()
                 generated_continuation = generated_ids[prompt_len:].tolist()
@@ -94,12 +84,14 @@ def text_generation(model, device=None, prompt=None, max_new_tokens=50, temperat
                 generated_str = decode_ids(tokenizer, generated_continuation, stop_at_eos=True)
                 decoded_preds.append(generated_str)
                 decoded_targets.append(target_str)
+                
                 if not dist.is_initialized() or dist.get_rank() == 0:
                     print(f"\n[Batch {batch_idx + 1}, Sample {i + 1}]")
                     print(f"[PROMPT ]: {prompt_str}")
                     print(f"[TARGET ]: {target_str}")
                     print(f"[PREDICT]: {generated_str}")
                 break
+
         return decoded_preds, decoded_targets
 
 def main():

@@ -1,11 +1,14 @@
-import torch
 import gc
 import os
-from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
+import torch
 from bert_score import score as bertscore
-from tokenizers import Tokenizer
+from data_preparation.config import Config
+from transformers import GPT2TokenizerFast
 from torch.nn.utils.rnn import pad_sequence
-
+from model_architecture.model import LanguageModel
+from torch.utils.data import DataLoader, DistributedSampler, Subset
+from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
+from data_preparation.tokenized_set.tokenized_dataset import TokenizedDataset
 
 def cleanup_memory():
     """Comprehensive memory cleanup"""
@@ -38,6 +41,7 @@ def setup_device():
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         torch.cuda.set_device(local_rank)
         device = torch.device(f"cuda:{local_rank}")
+
         use_ddp = True
         print(f"DDP mode: Using device cuda:{local_rank}")
     elif torch.cuda.is_available():
@@ -53,6 +57,7 @@ def setup_device():
         use_ddp = False
         print("CPU mode: Using device cpu")
     return local_rank, device, use_ddp
+
 # Padding collate function
 def pad_collate_fn(batch, pad_token_id=0):
     input_seqs = [item["input_ids"] for item in batch]
@@ -69,3 +74,84 @@ def decode_ids(tokenizer, ids, stop_at_eos = True):
         text = text.split("[EOS]")[0].strip()
     return text
 
+# Load tokenizer function
+def load_tokenizer():
+    tokenizer_path = os.path.join(Config.TOKENIZER_DIR, f"gpt2_tokenizer_{Config.DATASET_NAME}.json")
+    tokenizer= GPT2TokenizerFast.from_pretrained(tokenizer_path)
+    special_tokens = {"pad_token": "[PAD]", "eos_token": "[EOS]"}
+    tokenizer.add_special_tokens(special_tokens)
+    
+    Config.VOCAB_SIZE = len(tokenizer) 
+    Config.PAD_ID = tokenizer.pad_token_id
+    Config.EOS_ID = tokenizer.eos_token_id
+    return tokenizer
+
+def load_model(model_path,vocab_size):
+    """
+    Load a PCTransformer model from a checkpoint file.
+
+    Args:
+        model_path (str): Path to the saved model checkpoint.
+        config: Model configuration object.
+    Returns:
+        PCTransformer: The loaded model with weights.
+    """
+    model = LanguageModel(vocab_size)
+    model.load_state_dict(torch.load(model_path), strict = False)
+    return model
+
+def get_datasets():
+    train_dataset = TokenizedDataset("train", Config.TOKENIZER_DIR, Config.MAX_LENGTH)
+    valid_dataset = TokenizedDataset("valid", Config.TOKENIZER_DIR, Config.MAX_LENGTH)
+    test_dataset = TokenizedDataset("test", Config.TOKENIZER_DIR, Config.MAX_LENGTH)
+
+    train_dataset = Subset(train_dataset, range(0, 500000))
+    valid_dataset = Subset(valid_dataset, range(0, 80000))
+    test_dataset = Subset(test_dataset, range(0, 80000))
+
+    return train_dataset, valid_dataset, test_dataset
+
+def get_loaders(distributed: bool = False):
+    tokenizer = load_tokenizer()
+    pad_token_id = tokenizer.pad_token_id
+    train_dataset, valid_dataset, test_dataset = get_datasets()
+
+    if distributed:
+        train_sampler = DistributedSampler(train_dataset)
+        valid_sampler = DistributedSampler(valid_dataset, shuffle=False)
+        test_sampler = DistributedSampler(test_dataset, shuffle=False)
+    else:
+        train_sampler = valid_sampler = test_sampler = None
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=Config.BATCH_SIZE,
+        sampler=train_sampler,
+        shuffle=(train_sampler is None),
+        num_workers=Config.num_workers,
+        pin_memory=False,
+        collate_fn=lambda batch: pad_collate_fn(batch, pad_token_id),
+        persistent_workers=Config.num_workers > 0,
+        drop_last=True
+    )
+    valid_loader = DataLoader(
+        valid_dataset,
+        batch_size=Config.BATCH_SIZE,
+        sampler=valid_sampler,
+        shuffle=False,
+        num_workers=Config.num_workers,
+        pin_memory=False,
+        collate_fn=lambda batch: pad_collate_fn(batch, pad_token_id),
+        persistent_workers=Config.num_workers > 0
+    )                     
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=Config.BATCH_SIZE,
+        sampler=test_sampler,
+        shuffle=False,
+        num_workers=Config.num_workers,
+        pin_memory=False,
+        collate_fn=lambda batch: pad_collate_fn(batch, pad_token_id),
+        persistent_workers=Config.num_workers > 0
+    )
+    return train_loader, valid_loader, test_loader

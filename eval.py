@@ -1,21 +1,15 @@
-import time
-import math
-import torch
-from training import get_loaders
-import torch.nn.functional as F
-import sys
 import os
+import sys
+import time
+import torch
+import argparse
+from training import get_loaders
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from training import load_tokenizer, setup_device
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
-import nltk
-from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
-from bert_score import score as bertscore
-import argparse
 from training import load_model
 from utils.model_utils import *
-
 
 local_rank, device, use_ddp = setup_device()
 @torch.no_grad()
@@ -24,8 +18,10 @@ def evaluate(model, test_loader, tokenizer, max_batches=None,device=None):
     model.eval()
     total_loss = 0
     total_batches = 0
+
     # total_tokens = 0
     pad_token_id = tokenizer.pad_token_id
+
 
     if not dist.is_initialized() or dist.get_rank() == 0:
         if max_batches is None:
@@ -74,6 +70,11 @@ def evaluate(model, test_loader, tokenizer, max_batches=None,device=None):
     avg_loss = total_loss / total_batches if total_batches > 0 else float('inf')
     avg_perplexity = torch.exp(torch.tensor(avg_loss)).item() if avg_loss != float('inf') else float('inf')
     elapsed = time.time() - start_time
+    print(f"Evaluation completed in {elapsed:.2f} seconds")
+    print(f"Total Batches Processed: {batch_idx + 1}")
+    print(f"Avg Test CE Loss: {avg_loss:.4f} | Avg Test Perplexity: {avg_perplexity:.4f}")
+    return avg_loss,avg_perplexity
+
     # throughput_elapsed = throughput_end_time - throughput_start_time
 
     # # Calculate throughput
@@ -88,6 +89,7 @@ def evaluate(model, test_loader, tokenizer, max_batches=None,device=None):
 
     # return avg_loss, avg_perplexity, tokens_per_second
     return avg_loss, avg_perplexity
+
     
 def main():
     """
@@ -106,7 +108,6 @@ def main():
     tokenizer = load_tokenizer()
     vocab_size = len(tokenizer)
     
-
     model_path = "checkpoints/final_model.pt"
     model = load_model(model_path,vocab_size).to(device)
     # After model loading, add this check:
