@@ -1,299 +1,12 @@
-import torch
-import torch.nn as nn
-from torch.nn import functional as F
-from torch.utils.data import Dataset, DataLoader, Subset
-from torch.nn.utils.rnn import pad_sequence
-from torch.nn.parallel import DistributedDataParallel as DDP
-from tokenizers import Tokenizer, models, trainers, pre_tokenizers
 import os
-import pickle
-import json
-import nltk
 import time
+import torch
 import argparse
-import os
-import gc
-import torch.distributed as dist
-from torch.utils.data import DataLoader, DistributedSampler
-from functools import partial
 from utils.model_utils import *
-
-def load_model(model_path,vocab_size):
-    """
-    Load a PCTransformer model from a checkpoint file.
-
-    Args:
-        model_path (str): Path to the saved model checkpoint.
-        config: Model configuration object.
-    Returns:
-        PCTransformer: The loaded model with weights.
-    """
-    model = LanguageModel(vocab_size)
-    model.load_state_dict(torch.load(model_path), strict = False)
-    return model
-
-
-# Hyperparameters
-batch_size = 64
-block_size = 256
-MAX_LENGTH = 64
-learning_rate = 1e-5
-n_embd = 64
-n_head = 2
-n_layer = 2
-dropout = 0.1
-max_epochs = 10
-max_new_tokens = 50
-temperature = 1.0
-num_workers = 0
-
-# Directory setup
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__)) 
-DATA_DIR = os.path.join(BASE_DIR, "ptbdataset") 
-TOKENIZER_DIR = os.path.join(os.path.dirname(DATA_DIR), 'tokenized_ptb')
-os.makedirs(TOKENIZER_DIR, exist_ok=True)
-
-# BPE Tokenizer class
-class BPETokenizer:
-    def __init__(self):
-        self.tokenizer = Tokenizer(models.BPE(unk_token="[UNK]"))
-        self.tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
-        self.special_tokens = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]", "[EOS]"]
-
-    def train_and_save(self):
-        tokenizer_path = os.path.join(TOKENIZER_DIR, "tokenizer.json")
-        if os.path.exists(tokenizer_path):
-            print(f"Tokenizer already exists at {tokenizer_path}, skipping training.")
-            return
-        
-        train_path = os.path.join(DATA_DIR, "ptb.train.txt")
-        if not os.path.exists(train_path):
-            raise FileNotFoundError(f"Train file not found: {train_path}")
-        
-        with open(train_path, "r", encoding="utf-8") as f:
-            sentences = [line.strip() for line in f if line.strip()]
-
-        trainer = trainers.BpeTrainer(
-            special_tokens=self.special_tokens,
-            vocab_size=4000,
-            min_frequency=2
-        )
-        self.tokenizer.train_from_iterator(sentences, trainer=trainer)
-        tokenizer_path = os.path.join(TOKENIZER_DIR, "tokenizer.json")
-        self.tokenizer.save(tokenizer_path)
-
-        metadata = {"special_tokens": self.special_tokens}
-        metadata_path = os.path.join(TOKENIZER_DIR, "metadata.json")
-        with open(metadata_path, "w", encoding="utf-8") as f:
-            json.dump(metadata, f, indent=4)
-
-        print(f"Tokenizer trained and saved to {tokenizer_path}")
-        print(f"Metadata saved to {metadata_path}")
-
-    def tokenize_and_save(self, subset_name):
-        tokenizer_path = os.path.join(TOKENIZER_DIR, "tokenizer.json")
-        if not os.path.exists(tokenizer_path):
-            raise FileNotFoundError(f"Tokenizer file not found: {tokenizer_path}")
-        self.tokenizer = Tokenizer.from_file(tokenizer_path)
-        
-        subset_path = os.path.join(DATA_DIR, f"ptb.{subset_name}.txt")
-        if not os.path.exists(subset_path):
-            raise FileNotFoundError(f"{subset_name}.txt not found in {DATA_DIR}")
-        
-        with open(subset_path, "r", encoding="utf-8") as f:
-            sep_id = self.tokenizer.token_to_id("[EOS]")
-            if sep_id is None:
-                raise ValueError("Special token [EOS] not found in tokenizer vocabulary.")
-            
-            tokenized = [
-                self.tokenizer.encode(line.strip()).ids + [sep_id]
-                for line in f if line.strip()
-            ]
-
-        output_path = os.path.join(TOKENIZER_DIR, f"{subset_name}_ids.pkl")
-        if os.path.exists(output_path):
-            print(f"Tokenized IDs already exist for {subset_name} at {output_path}, skipping.")
-            return 
-
-        with open(output_path, "wb") as f:
-            pickle.dump(tokenized, f)
-
-        print(f"Tokenized ptb.{subset_name}.txt and saved IDs to {output_path}")
-# Tokenizer initialization will be moved to main() function
-
-# Penn Treebank Dataset class
-class PennTreebankDataset(Dataset):
-    def __init__(self, tokenized_file, tokenizer_dir, block_size):
-        self.tokenizer_dir = tokenizer_dir
-        self.block_size = block_size
-
-        tokenized_file_path = os.path.join(self.tokenizer_dir, tokenized_file)
-        if not os.path.exists(tokenized_file_path):
-            raise FileNotFoundError(f"Tokenized file not found: {tokenized_file_path}")
-
-        with open(tokenized_file_path, 'rb') as f:
-            self.sequences = pickle.load(f)
-
-        self.sequences = [seq for seq in self.sequences if len(seq) > 1]
-
-    def __len__(self):
-        return len(self.sequences)
-
-    def __getitem__(self, idx):
-        seq = self.sequences[idx]
-        input_ids = torch.tensor(seq[:-1][:self.block_size], dtype=torch.long)
-        target_ids = torch.tensor(seq[1:][:self.block_size], dtype=torch.long)
-        
-        return {"input_ids": input_ids, "target_ids": target_ids}
-# Load tokenizer function
-def load_tokenizer():
-    tokenizer_path = os.path.join(TOKENIZER_DIR, "tokenizer.json")
-    return Tokenizer.from_file(tokenizer_path)
-
-def get_datasets():
-    train_dataset = PennTreebankDataset("train_ids.pkl", TOKENIZER_DIR, MAX_LENGTH)
-    valid_dataset = PennTreebankDataset("valid_ids.pkl", TOKENIZER_DIR, MAX_LENGTH)
-    test_dataset = PennTreebankDataset("test_ids.pkl", TOKENIZER_DIR, MAX_LENGTH)
-    return train_dataset, valid_dataset, test_dataset
-
-def get_loaders(distributed: bool = False):
-    tokenizer = load_tokenizer()
-    pad_token_id = tokenizer.token_to_id("[PAD]")
-    train_dataset, valid_dataset, test_dataset = get_datasets()
-
-    if distributed:
-        train_sampler = DistributedSampler(train_dataset)
-        valid_sampler = DistributedSampler(valid_dataset, shuffle=False)
-        test_sampler = DistributedSampler(test_dataset, shuffle=False)
-    else:
-        train_sampler = valid_sampler = test_sampler = None
-
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        sampler=train_sampler,
-        shuffle=(train_sampler is None),
-        num_workers=num_workers,
-        pin_memory=False,
-        collate_fn=lambda batch: pad_collate_fn(batch, pad_token_id),
-        persistent_workers=num_workers > 0,
-        drop_last=True
-    )
-    valid_loader = DataLoader(
-        valid_dataset,
-        batch_size=batch_size,
-        sampler=valid_sampler,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=False,
-        collate_fn=lambda batch: pad_collate_fn(batch, pad_token_id),
-        persistent_workers=num_workers > 0
-    )                     
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=batch_size,
-        sampler=test_sampler,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=False,
-        collate_fn=lambda batch: pad_collate_fn(batch, pad_token_id),
-        persistent_workers=num_workers > 0
-    )
-    return train_loader, valid_loader, test_loader
-
-# Global variables will be set in main() function
-vocab_size = None
-pad_token_id = None
-eos_token_id = None
-
-# Model architecture
-class Head(nn.Module):
-    def __init__(self, head_size):
-        super().__init__()
-        self.key = nn.Linear(n_embd, head_size, bias=False)
-        self.query = nn.Linear(n_embd, head_size, bias=False)
-        self.value = nn.Linear(n_embd, head_size, bias=False)
-        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x):
-        B, T, C = x.shape
-        k = self.key(x)
-        q = self.query(x)
-        wei = q @ k.transpose(-2,-1) * C**-0.5
-        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
-        wei = F.softmax(wei, dim=-1)
-        wei = self.dropout(wei)
-        v = self.value(x)
-        out = wei @ v
-        return out
-
-class MultiHeadAttention(nn.Module):
-    def __init__(self, num_heads, head_size):
-        super().__init__()
-        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
-        self.proj = nn.Linear(n_embd, n_embd)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x):
-        out = torch.cat([h(x) for h in self.heads], dim=-1)
-        out = self.dropout(self.proj(out))
-        return out
-
-class FeedForward(nn.Module):
-    def __init__(self, n_embd):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(n_embd, 4 * n_embd),
-            nn.ReLU(),
-            nn.Linear(4 * n_embd, n_embd),
-            nn.Dropout(dropout),
-        )
-
-    def forward(self, x):
-        return self.net(x)
-
-class Block(nn.Module):
-    def __init__(self, n_embd, n_head):
-        super().__init__()
-        head_size = n_embd // n_head
-        self.sa = MultiHeadAttention(n_head, head_size)
-        self.ffwd = FeedForward(n_embd)
-        self.ln1 = nn.LayerNorm(n_embd)
-        self.ln2 = nn.LayerNorm(n_embd)
-
-    def forward(self, x):
-        x = x + self.sa(self.ln1(x))
-        x = x + self.ffwd(self.ln2(x))
-        return x
-
-class LanguageModel(nn.Module):
-    def __init__(self,vocab_size):
-        super().__init__()
-        self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
-        self.position_embedding_table = nn.Embedding(block_size, n_embd)
-        self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layer)])
-        self.ln_f = nn.LayerNorm(n_embd)
-        self.lm_head = nn.Linear(n_embd, vocab_size)
-
-    def forward(self, idx, targets=None):
-        B, T = idx.shape
-        tok_emb = self.token_embedding_table(idx)
-        pos_emb = self.position_embedding_table(torch.arange(T, device=idx.device))
-        x = tok_emb + pos_emb
-        x = self.blocks(x)
-        x = self.ln_f(x)
-        logits = self.lm_head(x)
-        if targets is None:
-            loss = None
-        else:
-            B, T, C = logits.shape
-            logits_flat = logits.view(B*T, C)
-            targets_flat = targets.view(B*T)
-            loss = F.cross_entropy(logits_flat, targets_flat)
-        return logits, loss
-
+import torch.distributed as dist
+from model_architecture.config import GPTConfig
+from model_architecture.model import LanguageModel
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 # Training function
 def train(model, train_loader, optimizer, epoch, device):
@@ -323,7 +36,6 @@ def train(model, train_loader, optimizer, epoch, device):
     avg_perplexity = torch.exp(torch.tensor(avg_loss)).item()
     return avg_loss, avg_perplexity
 
-
 def main():
     """Main training function with DDP support"""
     parser = argparse.ArgumentParser()
@@ -337,40 +49,40 @@ def main():
         dist.init_process_group(backend="nccl")
         
     tokenizer = load_tokenizer()
-    vocab_size = tokenizer.get_vocab_size()
+    vocab_size = len(tokenizer)
+    
     # Create model and move to device
     model = LanguageModel(vocab_size=vocab_size).to(device)
 
     # Wrap model with DDP if needed
     if use_ddp:
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+    
     # Create data loaders
     train_loader, valid_loader, test_loader = get_loaders(distributed=use_ddp)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=GPTConfig.learning_rate)
    
     start_training_time = time.time()
     
     rank = dist.get_rank() if dist.is_initialized() else 0
     if rank == 0:
-        print("Starting training...")
+        print("========== Starting training ==========")
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         print(f"{sum(p.numel() for p in model.parameters())/1e6:.5f} M parameters")
        
-
-    for epoch in range(max_epochs):
+    for epoch in range(GPTConfig.max_epochs):
         # Set epoch for distributed sampler
         if hasattr(train_loader, "sampler") and hasattr(train_loader.sampler, "set_epoch"):
             train_loader.sampler.set_epoch(epoch)
 
         if rank == 0:
-            print(f"\nEpoch {epoch + 1}/{max_epochs}")
+            print(f"\nEpoch {epoch + 1}/{GPTConfig.max_epochs}")
         
         model.train()
         avg_loss, avg_perplexity = train(model, train_loader, optimizer, epoch, device)
         
-
         if rank == 0:
             print(f"Epoch {epoch + 1} completed | avg_train_loss {avg_loss:.4f} | avg_train_perplexity {avg_perplexity:.4f}")
 
