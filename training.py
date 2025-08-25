@@ -17,19 +17,36 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
 from functools import partial
 from utils.model_utils import *
+from data_preparation.config import Config
+from transformers import GPT2TokenizerFast
 
 def load_model(model_path,vocab_size):
     """
-    Load a PCTransformer model from a checkpoint file.
+    Load a LanguageModel from a checkpoint file.
 
     Args:
         model_path (str): Path to the saved model checkpoint.
-        config: Model configuration object.
+        vocab_size (int): Vocabulary size for the model.
     Returns:
-        PCTransformer: The loaded model with weights.
+        LanguageModel: The loaded model with trained weights.
     """
     model = LanguageModel(vocab_size)
-    model.load_state_dict(torch.load(model_path), strict = False)
+    checkpoint = torch.load(model_path, map_location='cpu')
+
+    # Handle different checkpoint formats
+    if isinstance(checkpoint, dict):
+        if 'model_state' in checkpoint:
+            model.load_state_dict(checkpoint['model_state'], strict=False)
+        elif 'model_state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        else:
+            # Assume the dict itself is the state dict
+            model.load_state_dict(checkpoint, strict=False)
+    else:
+        # Assume it's directly the state dict
+        model.load_state_dict(checkpoint, strict=False)
+
+    print(f"Successfully loaded model from {model_path}")
     return model
 
 
@@ -42,85 +59,85 @@ n_embd = 64
 n_head = 2
 n_layer = 2
 dropout = 0.1
-max_epochs = 10
+max_epochs = 2
 max_new_tokens = 50
 temperature = 1.0
 num_workers = 0
 
 # Directory setup
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__)) 
-DATA_DIR = os.path.join(BASE_DIR, "ptbdataset") 
-TOKENIZER_DIR = os.path.join(os.path.dirname(DATA_DIR), 'tokenized_ptb')
-os.makedirs(TOKENIZER_DIR, exist_ok=True)
+# BASE_DIR = os.path.dirname(os.path.abspath(__file__)) 
+# DATA_DIR = os.path.join(BASE_DIR, "ptbdataset") 
+# TOKENIZER_DIR = os.path.join(os.path.dirname(DATA_DIR), 'tokenized_ptb')
+# os.makedirs(TOKENIZER_DIR, exist_ok=True)
 
-# BPE Tokenizer class
-class BPETokenizer:
-    def __init__(self):
-        self.tokenizer = Tokenizer(models.BPE(unk_token="[UNK]"))
-        self.tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
-        self.special_tokens = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]", "[EOS]"]
+# # BPE Tokenizer class
+# class BPETokenizer:
+#     def __init__(self):
+#         self.tokenizer = Tokenizer(models.BPE(unk_token="[UNK]"))
+#         self.tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+#         self.special_tokens = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]", "[EOS]"]
 
-    def train_and_save(self):
-        tokenizer_path = os.path.join(TOKENIZER_DIR, "tokenizer.json")
-        if os.path.exists(tokenizer_path):
-            print(f"Tokenizer already exists at {tokenizer_path}, skipping training.")
-            return
+#     def train_and_save(self):
+#         tokenizer_path = os.path.join(TOKENIZER_DIR, "tokenizer.json")
+#         if os.path.exists(tokenizer_path):
+#             print(f"Tokenizer already exists at {tokenizer_path}, skipping training.")
+#             return
         
-        train_path = os.path.join(DATA_DIR, "ptb.train.txt")
-        if not os.path.exists(train_path):
-            raise FileNotFoundError(f"Train file not found: {train_path}")
+#         train_path = os.path.join(DATA_DIR, "ptb.train.txt")
+#         if not os.path.exists(train_path):
+#             raise FileNotFoundError(f"Train file not found: {train_path}")
         
-        with open(train_path, "r", encoding="utf-8") as f:
-            sentences = [line.strip() for line in f if line.strip()]
+#         with open(train_path, "r", encoding="utf-8") as f:
+#             sentences = [line.strip() for line in f if line.strip()]
 
-        trainer = trainers.BpeTrainer(
-            special_tokens=self.special_tokens,
-            vocab_size=4000,
-            min_frequency=2
-        )
-        self.tokenizer.train_from_iterator(sentences, trainer=trainer)
-        tokenizer_path = os.path.join(TOKENIZER_DIR, "tokenizer.json")
-        self.tokenizer.save(tokenizer_path)
+#         trainer = trainers.BpeTrainer(
+#             special_tokens=self.special_tokens,
+#             vocab_size=4000,
+#             min_frequency=2
+#         )
+#         self.tokenizer.train_from_iterator(sentences, trainer=trainer)
+#         tokenizer_path = os.path.join(TOKENIZER_DIR, "tokenizer.json")
+#         self.tokenizer.save(tokenizer_path)
 
-        metadata = {"special_tokens": self.special_tokens}
-        metadata_path = os.path.join(TOKENIZER_DIR, "metadata.json")
-        with open(metadata_path, "w", encoding="utf-8") as f:
-            json.dump(metadata, f, indent=4)
+#         metadata = {"special_tokens": self.special_tokens}
+#         metadata_path = os.path.join(TOKENIZER_DIR, "metadata.json")
+#         with open(metadata_path, "w", encoding="utf-8") as f:
+#             json.dump(metadata, f, indent=4)
 
-        print(f"Tokenizer trained and saved to {tokenizer_path}")
-        print(f"Metadata saved to {metadata_path}")
+#         print(f"Tokenizer trained and saved to {tokenizer_path}")
+#         print(f"Metadata saved to {metadata_path}")
 
-    def tokenize_and_save(self, subset_name):
-        tokenizer_path = os.path.join(TOKENIZER_DIR, "tokenizer.json")
-        if not os.path.exists(tokenizer_path):
-            raise FileNotFoundError(f"Tokenizer file not found: {tokenizer_path}")
-        self.tokenizer = Tokenizer.from_file(tokenizer_path)
+#     def tokenize_and_save(self, subset_name):
+#         tokenizer_path = os.path.join(TOKENIZER_DIR, "tokenizer.json")
+#         if not os.path.exists(tokenizer_path):
+#             raise FileNotFoundError(f"Tokenizer file not found: {tokenizer_path}")
+#         self.tokenizer = Tokenizer.from_file(tokenizer_path)
         
-        subset_path = os.path.join(DATA_DIR, f"ptb.{subset_name}.txt")
-        if not os.path.exists(subset_path):
-            raise FileNotFoundError(f"{subset_name}.txt not found in {DATA_DIR}")
+#         subset_path = os.path.join(DATA_DIR, f"ptb.{subset_name}.txt")
+#         if not os.path.exists(subset_path):
+#             raise FileNotFoundError(f"{subset_name}.txt not found in {DATA_DIR}")
         
-        with open(subset_path, "r", encoding="utf-8") as f:
-            sep_id = self.tokenizer.token_to_id("[EOS]")
-            if sep_id is None:
-                raise ValueError("Special token [EOS] not found in tokenizer vocabulary.")
+#         with open(subset_path, "r", encoding="utf-8") as f:
+#             sep_id = self.tokenizer.token_to_id("[EOS]")
+#             if sep_id is None:
+#                 raise ValueError("Special token [EOS] not found in tokenizer vocabulary.")
             
-            tokenized = [
-                self.tokenizer.encode(line.strip()).ids + [sep_id]
-                for line in f if line.strip()
-            ]
+#             tokenized = [
+#                 self.tokenizer.encode(line.strip()).ids + [sep_id]
+#                 for line in f if line.strip()
+#             ]
 
-        output_path = os.path.join(TOKENIZER_DIR, f"{subset_name}_ids.pkl")
-        if os.path.exists(output_path):
-            print(f"Tokenized IDs already exist for {subset_name} at {output_path}, skipping.")
-            return 
+#         output_path = os.path.join(TOKENIZER_DIR, f"{subset_name}_ids.pkl")
+#         if os.path.exists(output_path):
+#             print(f"Tokenized IDs already exist for {subset_name} at {output_path}, skipping.")
+#             return 
 
-        with open(output_path, "wb") as f:
-            pickle.dump(tokenized, f)
+#         with open(output_path, "wb") as f:
+#             pickle.dump(tokenized, f)
 
-        print(f"Tokenized ptb.{subset_name}.txt and saved IDs to {output_path}")
-# Tokenizer initialization will be moved to main() function
+#         print(f"Tokenized ptb.{subset_name}.txt and saved IDs to {output_path}")
+# # Tokenizer initialization will be moved to main() function
 
 # Penn Treebank Dataset class
 class PennTreebankDataset(Dataset):
@@ -147,19 +164,28 @@ class PennTreebankDataset(Dataset):
         
         return {"input_ids": input_ids, "target_ids": target_ids}
 # Load tokenizer function
+# def load_tokenizer():
+#     tokenizer_path = os.path.join(TOKENIZER_DIR, "tokenizer.json")
+#     return Tokenizer.from_file(tokenizer_path)
 def load_tokenizer():
-    tokenizer_path = os.path.join(TOKENIZER_DIR, "tokenizer.json")
-    return Tokenizer.from_file(tokenizer_path)
-
+    tokenizer_path = os.path.join(Config.TOKENIZER_DIR, f"gpt2_tokenizer_{Config.DATASET_NAME}.json")
+    tokenizer= GPT2TokenizerFast.from_pretrained(tokenizer_path)
+    special_tokens = {"pad_token": "[PAD]", "eos_token": "[EOS]"}
+    tokenizer.add_special_tokens(special_tokens)
+    
+    Config.VOCAB_SIZE = len(tokenizer) 
+    Config.PAD_ID = tokenizer.pad_token_id
+    Config.EOS_ID = tokenizer.eos_token_id
+    return tokenizer
 def get_datasets():
-    train_dataset = PennTreebankDataset("train_ids.pkl", TOKENIZER_DIR, MAX_LENGTH)
-    valid_dataset = PennTreebankDataset("valid_ids.pkl", TOKENIZER_DIR, MAX_LENGTH)
-    test_dataset = PennTreebankDataset("test_ids.pkl", TOKENIZER_DIR, MAX_LENGTH)
+    train_dataset = PennTreebankDataset("ptb_train_ids.pkl", Config.TOKENIZER_DIR, MAX_LENGTH)
+    valid_dataset = PennTreebankDataset("ptb_valid_ids.pkl", Config.TOKENIZER_DIR, MAX_LENGTH)
+    test_dataset = PennTreebankDataset("ptb_test_ids.pkl", Config.TOKENIZER_DIR, MAX_LENGTH)
     return train_dataset, valid_dataset, test_dataset
 
 def get_loaders(distributed: bool = False):
     tokenizer = load_tokenizer()
-    pad_token_id = tokenizer.token_to_id("[PAD]")
+    pad_token_id = tokenizer.pad_token_id
     train_dataset, valid_dataset, test_dataset = get_datasets()
 
     if distributed:
@@ -296,16 +322,34 @@ class LanguageModel(nn.Module):
 
 
 # Training function
-def train(model, train_loader, optimizer, epoch, device):
+def train(model, train_loader, optimizer, epoch, device, tokenizer=None):
     model.train()
     total_loss = 0
     total_batches = 0
+    total_tokens = 0
+    pad_token_id = tokenizer.pad_token_id if tokenizer else None
+
+    # Start timing for throughput calculation
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    start_time = time.time()
 
     for batch_idx, batch in enumerate(train_loader):
         xb = batch['input_ids'].to(device)
         yb = batch['target_ids'].to(device)
 
-        logits, loss = model(xb, yb)
+        # Count tokens processed by the model (input tokens)
+        if pad_token_id is not None:
+            # Count non-padding tokens in input (what model actually processes)
+            non_pad_mask = (xb != pad_token_id)
+            batch_tokens = non_pad_mask.sum().item()
+        else:
+            # If no pad token, count all input tokens
+            batch_tokens = xb.numel()
+
+        total_tokens += batch_tokens
+
+        _, loss = model(xb, yb)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
@@ -314,21 +358,33 @@ def train(model, train_loader, optimizer, epoch, device):
         total_batches += 1
 
         if (not dist.is_initialized() or dist.get_rank() == 0) and (batch_idx + 1) % 10 == 0:
-            print(f"  Batch {batch_idx + 1}/{len(train_loader)} | train_loss {loss.item():.4f} | train_perplexity {torch.exp(loss).item():.4f}", flush=True)
+            # Calculate current throughput
+            elapsed_so_far = time.time() - start_time
+            current_throughput = total_tokens / elapsed_so_far if elapsed_so_far > 0 else 0
+            print(f"  Batch {batch_idx + 1}/{len(train_loader)} | train_loss {loss.item():.4f} | train_perplexity {torch.exp(loss).item():.4f} | throughput {current_throughput:.0f} tokens/sec", flush=True)
 
         # Clean up memory
         cleanup_memory()
 
+    # End timing for throughput calculation
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    end_time = time.time()
+
+    # Calculate final metrics
+    elapsed_time = end_time - start_time
     avg_loss = total_loss / total_batches
     avg_perplexity = torch.exp(torch.tensor(avg_loss)).item()
-    return avg_loss, avg_perplexity
+    tokens_per_second = total_tokens / elapsed_time if elapsed_time > 0 else 0
+
+    return avg_loss, avg_perplexity, tokens_per_second, total_tokens, elapsed_time
 
 
 def main():
     """Main training function with DDP support"""
     parser = argparse.ArgumentParser()
     parser.add_argument('--flash', action='store_true', help='Enable FlashAttention (not implemented in this model)')
-    args = parser.parse_args()
+    _ = parser.parse_args()  # Currently unused but kept for future flash attention support
 
     # Setup device and DDP
     local_rank, device, use_ddp = setup_device()
@@ -337,7 +393,8 @@ def main():
         dist.init_process_group(backend="nccl")
         
     tokenizer = load_tokenizer()
-    vocab_size = tokenizer.get_vocab_size()
+    # vocab_size = tokenizer.get_vocab_size()
+    vocab_size = len(tokenizer)
     # Create model and move to device
     model = LanguageModel(vocab_size=vocab_size).to(device)
 
@@ -345,7 +402,7 @@ def main():
     if use_ddp:
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
     # Create data loaders
-    train_loader, valid_loader, test_loader = get_loaders(distributed=use_ddp)
+    train_loader, _, _ = get_loaders(distributed=use_ddp)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
    
@@ -368,11 +425,11 @@ def main():
             print(f"\nEpoch {epoch + 1}/{max_epochs}")
         
         model.train()
-        avg_loss, avg_perplexity = train(model, train_loader, optimizer, epoch, device)
-        
+        avg_loss, avg_perplexity, throughput, total_tokens, epoch_time = train(model, train_loader, optimizer, epoch, device, tokenizer)
+
 
         if rank == 0:
-            print(f"Epoch {epoch + 1} completed | avg_train_loss {avg_loss:.4f} | avg_train_perplexity {avg_perplexity:.4f}")
+            print(f"Epoch {epoch + 1} completed | avg_train_loss {avg_loss:.4f} | avg_train_perplexity {avg_perplexity:.4f} | throughput {throughput:.0f} tokens/sec | tokens {total_tokens:,} | time {epoch_time:.1f}s")
 
     if rank == 0:
         if torch.cuda.is_available():
