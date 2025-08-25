@@ -326,7 +326,7 @@ def train(model, train_loader, optimizer, epoch, device, tokenizer=None):
     model.train()
     total_loss = 0
     total_batches = 0
-    total_tokens = 0
+    # total_tokens = 0
     pad_token_id = tokenizer.pad_token_id if tokenizer else None
 
     # Start timing for throughput calculation
@@ -338,16 +338,16 @@ def train(model, train_loader, optimizer, epoch, device, tokenizer=None):
         xb = batch['input_ids'].to(device)
         yb = batch['target_ids'].to(device)
 
-        # Count tokens processed by the model (input tokens)
-        if pad_token_id is not None:
-            # Count non-padding tokens in input (what model actually processes)
-            non_pad_mask = (xb != pad_token_id)
-            batch_tokens = non_pad_mask.sum().item()
-        else:
-            # If no pad token, count all input tokens
-            batch_tokens = xb.numel()
+        # # Count tokens processed by the model (input tokens)
+        # if pad_token_id is not None:
+        #     # Count non-padding tokens in input (what model actually processes)
+        #     non_pad_mask = (xb != pad_token_id)
+        #     batch_tokens = non_pad_mask.sum().item()
+        # else:
+        #     # If no pad token, count all input tokens
+        #     batch_tokens = xb.numel()
 
-        total_tokens += batch_tokens
+        # total_tokens += batch_tokens
 
         _, loss = model(xb, yb)
         optimizer.zero_grad(set_to_none=True)
@@ -357,11 +357,11 @@ def train(model, train_loader, optimizer, epoch, device, tokenizer=None):
         total_loss += loss.item()
         total_batches += 1
 
-        if (not dist.is_initialized() or dist.get_rank() == 0) and (batch_idx + 1) % 10 == 0:
-            # Calculate current throughput
-            elapsed_so_far = time.time() - start_time
-            current_throughput = total_tokens / elapsed_so_far if elapsed_so_far > 0 else 0
-            print(f"  Batch {batch_idx + 1}/{len(train_loader)} | train_loss {loss.item():.4f} | train_perplexity {torch.exp(loss).item():.4f} | throughput {current_throughput:.0f} tokens/sec", flush=True)
+        # if (not dist.is_initialized() or dist.get_rank() == 0) and (batch_idx + 1) % 10 == 0:
+        #     # Calculate current throughput
+        #     elapsed_so_far = time.time() - start_time
+        #     current_throughput = total_tokens / elapsed_so_far if elapsed_so_far > 0 else 0
+        #     print(f"  Batch {batch_idx + 1}/{len(train_loader)} | train_loss {loss.item():.4f} | train_perplexity {torch.exp(loss).item():.4f} | throughput {current_throughput:.0f} tokens/sec", flush=True)
 
         # Clean up memory
         cleanup_memory()
@@ -375,10 +375,10 @@ def train(model, train_loader, optimizer, epoch, device, tokenizer=None):
     elapsed_time = end_time - start_time
     avg_loss = total_loss / total_batches
     avg_perplexity = torch.exp(torch.tensor(avg_loss)).item()
-    tokens_per_second = total_tokens / elapsed_time if elapsed_time > 0 else 0
+    # tokens_per_second = total_tokens / elapsed_time if elapsed_time > 0 else 0
 
-    return avg_loss, avg_perplexity, tokens_per_second, total_tokens, elapsed_time
-
+    # return avg_loss, avg_perplexity, tokens_per_second, total_tokens, elapsed_time
+    return avg_loss, avg_perplexity
 
 def main():
     """Main training function with DDP support"""
@@ -425,12 +425,12 @@ def main():
             print(f"\nEpoch {epoch + 1}/{max_epochs}")
         
         model.train()
-        avg_loss, avg_perplexity, throughput, total_tokens, epoch_time = train(model, train_loader, optimizer, epoch, device, tokenizer)
-
+            # avg_loss, avg_perplexity, throughput, total_tokens, epoch_time = train(model, train_loader, optimizer, epoch, device, tokenizer)
+        avg_loss, avg_perplexity = train(model, train_loader, optimizer, epoch, device, tokenizer)
 
         if rank == 0:
-            print(f"Epoch {epoch + 1} completed | avg_train_loss {avg_loss:.4f} | avg_train_perplexity {avg_perplexity:.4f} | throughput {throughput:.0f} tokens/sec | tokens {total_tokens:,} | time {epoch_time:.1f}s")
-
+    #         print(f"Epoch {epoch + 1} completed | avg_train_loss {avg_loss:.4f} | avg_train_perplexity {avg_perplexity:.4f} | throughput {throughput:.0f} tokens/sec | tokens {total_tokens:,} | time {epoch_time:.1f}s")
+            print(f"Epoch {epoch + 1} completed | avg_train_loss {avg_loss:.4f} | avg_train_perplexity {avg_perplexity:.4f}")
     if rank == 0:
         if torch.cuda.is_available():
             torch.cuda.synchronize()

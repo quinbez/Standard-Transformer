@@ -24,7 +24,7 @@ def evaluate(model, test_loader, tokenizer, max_batches=None,device=None):
     model.eval()
     total_loss = 0
     total_batches = 0
-    total_tokens = 0
+    # total_tokens = 0
     pad_token_id = tokenizer.pad_token_id
 
     if not dist.is_initialized() or dist.get_rank() == 0:
@@ -36,7 +36,7 @@ def evaluate(model, test_loader, tokenizer, max_batches=None,device=None):
     # Start timing for throughput calculation
     if torch.cuda.is_available():
         torch.cuda.synchronize()
-    throughput_start_time = time.time()
+    # throughput_start_time = time.time()
 
     for batch_idx, batch in enumerate(test_loader):
         if max_batches is not None and batch_idx >= max_batches:
@@ -47,15 +47,15 @@ def evaluate(model, test_loader, tokenizer, max_batches=None,device=None):
 
         # Count tokens processed by the model (input tokens)
         # This represents the actual computational work done in the forward pass
-        if pad_token_id is not None:
-            # Count non-padding tokens in input (what model actually processes)
-            non_pad_mask = (input_ids != pad_token_id)
-            batch_tokens = non_pad_mask.sum().item()
-        else:
-            # If no pad token, count all input tokens
-            batch_tokens = input_ids.numel()
+        # if pad_token_id is not None:
+        #     # Count non-padding tokens in input (what model actually processes)
+        #     non_pad_mask = (input_ids != pad_token_id)
+        #     batch_tokens = non_pad_mask.sum().item()
+        # else:
+        #     # If no pad token, count all input tokens
+        #     batch_tokens = input_ids.numel()
 
-        total_tokens += batch_tokens
+        # total_tokens += batch_tokens
 
         # Compute loss
         _, loss = model(input_ids, targets)
@@ -74,20 +74,20 @@ def evaluate(model, test_loader, tokenizer, max_batches=None,device=None):
     avg_loss = total_loss / total_batches if total_batches > 0 else float('inf')
     avg_perplexity = torch.exp(torch.tensor(avg_loss)).item() if avg_loss != float('inf') else float('inf')
     elapsed = time.time() - start_time
-    throughput_elapsed = throughput_end_time - throughput_start_time
+    # throughput_elapsed = throughput_end_time - throughput_start_time
 
-    # Calculate throughput
-    tokens_per_second = total_tokens / throughput_elapsed if throughput_elapsed > 0 else 0
+    # # Calculate throughput
+    # tokens_per_second = total_tokens / throughput_elapsed if throughput_elapsed > 0 else 0
 
     if not dist.is_initialized() or dist.get_rank() == 0:
         print(f"Evaluation completed in {elapsed:.2f} seconds")
         print(f"Total Batches Processed: {batch_idx + 1}")
         print(f"Total Tokens Processed: {total_tokens:,}")
-        print(f"Throughput: {tokens_per_second:.2f} tokens/sec")
+        # print(f"Throughput: {tokens_per_second:.2f} tokens/sec")
         print(f"Avg Test CE Loss: {avg_loss:.4f} | Avg Test Perplexity: {avg_perplexity:.4f}")
 
-    return avg_loss, avg_perplexity, tokens_per_second
-
+    # return avg_loss, avg_perplexity, tokens_per_second
+    return avg_loss, avg_perplexity
     
 def main():
     """
@@ -152,13 +152,15 @@ def main():
     if torch.cuda.is_available():
             torch.cuda.synchronize()
     start_time = time.time()
-    avg_loss, avg_perplexity, throughput = evaluate(model, test_loader, tokenizer, max_batches = None, device = device)
+    # avg_loss, avg_perplexity, throughput = evaluate(model, test_loader, tokenizer, max_batches = None, device = device)
+    avg_loss, avg_perplexity = evaluate(model, test_loader, tokenizer, max_batches = None, device = device)
     if torch.cuda.is_available():
             torch.cuda.synchronize()
     elapsed = time.time() - start_time
     if not dist.is_initialized() or dist.get_rank() == 0:
         print(f"Overall evaluation completed in {elapsed:.2f} seconds")
-        print(f"Final Results - Loss: {avg_loss:.4f}, Perplexity: {avg_perplexity:.4f}, Throughput: {throughput:.2f} tokens/sec")
+        # print(f"Final Results - Loss: {avg_loss:.4f}, Perplexity: {avg_perplexity:.4f}, Throughput: {throughput:.2f} tokens/sec")
+        print(f"Final Results - Loss: {avg_loss:.4f}, Perplexity: {avg_perplexity:.4f}")
 
     if use_ddp and dist.is_initialized():   
         dist.barrier()
