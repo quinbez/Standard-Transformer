@@ -46,7 +46,7 @@ def evaluate(model, test_loader, tokenizer, max_batches=None,device=None):
         total_batches += 1
         
         if (not dist.is_initialized() or dist.get_rank() == 0) and (batch_idx + 1) % 10 == 0:
-             print(f"  Batch {batch_idx + 1}/{len(test_loader)} | train_loss {loss.item():.4f} | train_perplexity {torch.exp(loss).item():.4f}", flush=True)
+             print(f"  Batch {batch_idx + 1}/{len(test_loader)} | test_loss {loss.item():.4f} | test_perplexity {torch.exp(loss).item():.4f}", flush=True)
            
     # Compute average loss and perplexity
     avg_loss = total_loss / total_batches if total_batches > 0 else float('inf')
@@ -77,7 +77,41 @@ def main():
     
 
     model_path = "checkpoints/final_model.pt"
+    checkpoint = torch.load(model_path, map_location=device)
     model = load_model(model_path,vocab_size).to(device)
+    # After model loading, add this check:
+#     print("=== MODEL LOADING VERIFICATION ===")
+
+# # Check if model has reasonable parameter values (not random)
+#     first_layer = next(model.parameters())
+#     print(f"First layer stats - Mean: {first_layer.mean().item():.6f}, Std: {first_layer.std().item():.6f}")
+
+# # Random initialized models typically have mean ~0, std ~0.1-0.5
+# # Trained models usually have different statistics
+
+# # Also check a few specific parameters
+#     for name, param in list(model.named_parameters())[:3]:
+#         print(f"{name}: mean={param.mean().item():.6f}, std={param.std().item():.6f}")
+
+#     print("=== END VERIFICATION ===")
+    # checkpoint = torch.load("checkpoints/final_model.pt", map_location='cpu')
+    # print("Checkpoint structure:")
+    # for key in checkpoint.keys():
+    #     if isinstance(checkpoint[key], dict):
+    #         print(f"  {key}: {len(checkpoint[key])} items")
+    #     # Show first few keys
+    #     for i, subkey in enumerate(list(checkpoint[key].keys())[:3]):
+    #         print(f"    {subkey}")
+    # else:
+    #     print(f"  {key}: {type(checkpoint[key])}")
+    # model_keys = set(model.state_dict().keys())
+    # checkpoint_keys = set(checkpoint['model_state'].keys())  # or whatever key contains the weights
+
+    # print(f"Model has {len(model_keys)} parameters")
+    # print(f"Checkpoint has {len(checkpoint_keys)} parameters")
+    # print(f"Matching keys: {len(model_keys & checkpoint_keys)}")
+    # print(f"Missing in checkpoint: {model_keys - checkpoint_keys}")
+    # print(f"Extra in checkpoint: {checkpoint_keys - model_keys}")
 
     if use_ddp:
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
