@@ -86,28 +86,53 @@ def load_tokenizer():
     Config.EOS_ID = tokenizer.eos_token_id
     return tokenizer
 
+# def load_model(model_path,vocab_size):
+#     """
+#     Load a PCTransformer model from a checkpoint file.
+
+#     Args:
+#         model_path (str): Path to the saved model checkpoint.
+#         config: Model configuration object.
+#     Returns:
+#         PCTransformer: The loaded model with weights.
+#     """
+#     model = LanguageModel(vocab_size)
+#     model.load_state_dict(torch.load(model_path), strict = False)
+#     return model
 def load_model(model_path,vocab_size):
     """
-    Load a PCTransformer model from a checkpoint file.
+    Load a LanguageModel from a checkpoint file.
 
     Args:
         model_path (str): Path to the saved model checkpoint.
-        config: Model configuration object.
+        vocab_size (int): Vocabulary size for the model.
     Returns:
-        PCTransformer: The loaded model with weights.
+        LanguageModel: The loaded model with trained weights.
     """
     model = LanguageModel(vocab_size)
-    model.load_state_dict(torch.load(model_path), strict = False)
+    checkpoint = torch.load(model_path, map_location='cpu')
+
+    # Handle different checkpoint formats
+    if isinstance(checkpoint, dict):
+        if 'model_state' in checkpoint:
+            model.load_state_dict(checkpoint['model_state'], strict=False)
+        elif 'model_state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        else:
+            # Assume the dict itself is the state dict
+            model.load_state_dict(checkpoint, strict=False)
+    else:
+        # Assume it's directly the state dict
+        model.load_state_dict(checkpoint, strict=False)
+
+    print(f"Successfully loaded model from {model_path}")
     return model
+
 
 def get_datasets():
     train_dataset = TokenizedDataset("train", Config.TOKENIZER_DIR, Config.MAX_LENGTH)
     valid_dataset = TokenizedDataset("valid", Config.TOKENIZER_DIR, Config.MAX_LENGTH)
     test_dataset = TokenizedDataset("test", Config.TOKENIZER_DIR, Config.MAX_LENGTH)
-
-    train_dataset = Subset(train_dataset, range(0, 500000))
-    valid_dataset = Subset(valid_dataset, range(0, 80000))
-    test_dataset = Subset(test_dataset, range(0, 80000))
 
     return train_dataset, valid_dataset, test_dataset
 
