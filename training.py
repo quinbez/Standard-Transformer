@@ -52,10 +52,7 @@ def train(model, train_loader, optimizer, epoch, device, tokenizer=None):
         total_batches += 1
 
         if (not dist.is_initialized() or dist.get_rank() == 0) and (batch_idx + 1) % 10 == 0:
-        #     # Calculate current throughput
-            elapsed_so_far = time.time() - start_time
-            current_throughput = total_tokens / elapsed_so_far if elapsed_so_far > 0 else 0
-            print(f"  Batch {batch_idx + 1}/{len(train_loader)} | train_loss {loss.item():.4f} | train_perplexity {torch.exp(loss).item():.4f} | throughput {current_throughput:.0f} tokens/sec", flush=True)
+            print(f"  Batch {batch_idx + 1}/{len(train_loader)} | train_loss {loss.item():.4f} | train_perplexity {torch.exp(loss).item():.4f}", flush=True)
 
         # Clean up memory
         cleanup_memory()
@@ -69,10 +66,10 @@ def train(model, train_loader, optimizer, epoch, device, tokenizer=None):
     elapsed_time = end_time - start_time
     avg_loss = total_loss / total_batches
     avg_perplexity = torch.exp(torch.tensor(avg_loss)).item()
-    tokens_per_second = total_tokens / elapsed_time if elapsed_time > 0 else 0
+    throughput = total_tokens / elapsed_time if elapsed_time > 0 else 0
 
 
-    return avg_loss, avg_perplexity, tokens_per_second, total_tokens
+    return avg_loss, avg_perplexity, throughput, total_tokens
     
 
 def main():

@@ -69,7 +69,6 @@ def evaluate(model, test_loader, tokenizer, max_batches=None,device=None):
     # Compute metrics
     avg_loss = total_loss / total_batches if total_batches > 0 else float('inf')
     avg_perplexity = torch.exp(torch.tensor(avg_loss)).item() if avg_loss != float('inf') else float('inf')
-   
     throughput_elapsed = throughput_end_time - throughput_start_time
     # Calculate throughput
     throughput = total_tokens / throughput_elapsed if throughput_elapsed > 0 else 0
