@@ -10,6 +10,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 from training import load_model
 from utils.model_utils import *
+from torch.utils.data import Dataset, DataLoader, Subset
 
 local_rank, device, use_ddp = setup_device()
 @torch.no_grad()
@@ -80,15 +81,15 @@ def evaluate(model, test_loader, tokenizer, max_batches=None,device=None):
     # # Calculate throughput
     # tokens_per_second = total_tokens / throughput_elapsed if throughput_elapsed > 0 else 0
 
-    if not dist.is_initialized() or dist.get_rank() == 0:
-        print(f"Evaluation completed in {elapsed:.2f} seconds")
-        print(f"Total Batches Processed: {batch_idx + 1}")
-        print(f"Total Tokens Processed: {total_tokens:,}")
-        # print(f"Throughput: {tokens_per_second:.2f} tokens/sec")
-        print(f"Avg Test CE Loss: {avg_loss:.4f} | Avg Test Perplexity: {avg_perplexity:.4f}")
+    # if not dist.is_initialized() or dist.get_rank() == 0:
+    #     print(f"Evaluation completed in {elapsed:.2f} seconds")
+    #     print(f"Total Batches Processed: {batch_idx + 1}")
+    #     print(f"Total Tokens Processed: {total_tokens:,}")
+    #     # print(f"Throughput: {tokens_per_second:.2f} tokens/sec")
+    #     print(f"Avg Test CE Loss: {avg_loss:.4f} | Avg Test Perplexity: {avg_perplexity:.4f}")
 
-    # return avg_loss, avg_perplexity, tokens_per_second
-    return avg_loss, avg_perplexity
+    # # return avg_loss, avg_perplexity, tokens_per_second
+    # return avg_loss, avg_perplexity
 
     
 def main():
@@ -110,39 +111,6 @@ def main():
     
     model_path = "checkpoints/final_model.pt"
     model = load_model(model_path,vocab_size).to(device)
-    # After model loading, add this check:
-#     print("=== MODEL LOADING VERIFICATION ===")
-
-# # Check if model has reasonable parameter values (not random)
-#     first_layer = next(model.parameters())
-#     print(f"First layer stats - Mean: {first_layer.mean().item():.6f}, Std: {first_layer.std().item():.6f}")
-
-# # Random initialized models typically have mean ~0, std ~0.1-0.5
-# # Trained models usually have different statistics
-
-# # Also check a few specific parameters
-#     for name, param in list(model.named_parameters())[:3]:
-#         print(f"{name}: mean={param.mean().item():.6f}, std={param.std().item():.6f}")
-
-#     print("=== END VERIFICATION ===")
-    # checkpoint = torch.load("checkpoints/final_model.pt", map_location='cpu')
-    # print("Checkpoint structure:")
-    # for key in checkpoint.keys():
-    #     if isinstance(checkpoint[key], dict):
-    #         print(f"  {key}: {len(checkpoint[key])} items")
-    #     # Show first few keys
-    #     for i, subkey in enumerate(list(checkpoint[key].keys())[:3]):
-    #         print(f"    {subkey}")
-    # else:
-    #     print(f"  {key}: {type(checkpoint[key])}")
-    # model_keys = set(model.state_dict().keys())
-    # checkpoint_keys = set(checkpoint['model_state'].keys())  # or whatever key contains the weights
-
-    # print(f"Model has {len(model_keys)} parameters")
-    # print(f"Checkpoint has {len(checkpoint_keys)} parameters")
-    # print(f"Matching keys: {len(model_keys & checkpoint_keys)}")
-    # print(f"Missing in checkpoint: {model_keys - checkpoint_keys}")
-    # print(f"Extra in checkpoint: {checkpoint_keys - model_keys}")
 
     if use_ddp:
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
@@ -161,7 +129,7 @@ def main():
     if not dist.is_initialized() or dist.get_rank() == 0:
         print(f"Overall evaluation completed in {elapsed:.2f} seconds")
         # print(f"Final Results - Loss: {avg_loss:.4f}, Perplexity: {avg_perplexity:.4f}, Throughput: {throughput:.2f} tokens/sec")
-        print(f"Final Results - Loss: {avg_loss:.4f}, Perplexity: {avg_perplexity:.4f}")
+       
 
     if use_ddp and dist.is_initialized():   
         dist.barrier()
