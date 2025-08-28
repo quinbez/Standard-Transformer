@@ -29,8 +29,11 @@ Install required packages:
 ```bash
 pip install -r requirements.txt
 ``` 
-
-Run the main script
+Tokenize data
 ```bash
-python main.py
+python -m data_preparation.tokenizer.gpt2_tokenizer
+``` 
+Train the model
+```bash
+python training.py
 ``` 
