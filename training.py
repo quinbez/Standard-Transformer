@@ -15,13 +15,117 @@ from data_preparation.config import Config
 from transformers import GPT2TokenizerFast
 from torch.utils.data import Dataset, DataLoader, Subset
 
+def calculate_model_flops(model, batch_size, seq_length, vocab_size):
+    """
+    Calculate FLOPs for a transformer model forward pass.
+
+    Args:
+        model: The transformer model
+        batch_size: Batch size
+        seq_length: Sequence length
+        vocab_size: Vocabulary size
+
+    Returns:
+        dict: Dictionary containing FLOP breakdown
+    """
+    # Get model parameters from the actual model
+    n_layer = len([m for m in model.modules() if hasattr(m, 'sa')])  # Count transformer blocks
+    n_embd = model.token_embedding_table.embedding_dim
+    n_head = None
+
+    # Try to get n_head from the model structure
+    for module in model.modules():
+        if hasattr(module, 'heads') and hasattr(module.heads, '__len__'):
+            n_head = len(module.heads)
+            break
+
+    if n_head is None:
+        n_head = 8  # Default fallback
+
+    B, T = batch_size, seq_length
+
+    flops = {}
+
+    # 1. Token + Position Embeddings (no FLOPs, just lookups)
+    flops['embeddings'] = 0
+
+    # 2. Transformer Blocks
+    for layer in range(n_layer):
+        layer_flops = 0
+
+        # Multi-Head Attention
+        # Q, K, V projections: 3 * (B * T * n_embd * n_embd)
+        layer_flops += 3 * B * T * n_embd * n_embd
+
+        # Attention scores: B * n_head * T * T * (n_embd // n_head)
+        layer_flops += B * n_head * T * T * (n_embd // n_head)
+
+        # Attention output: B * n_head * T * T * (n_embd // n_head)
+        layer_flops += B * n_head * T * T * (n_embd // n_head)
+
+        # Output projection: B * T * n_embd * n_embd
+        layer_flops += B * T * n_embd * n_embd
+
+        # Feed Forward Network
+        # First linear: B * T * n_embd * (4 * n_embd)
+        layer_flops += B * T * n_embd * (4 * n_embd)
+
+        # Second linear: B * T * (4 * n_embd) * n_embd
+        layer_flops += B * T * (4 * n_embd) * n_embd
+
+        flops[f'layer_{layer}'] = layer_flops
+
+    # 3. Final Layer Norm (minimal FLOPs)
+    flops['final_ln'] = B * T * n_embd * 2  # mean and variance
+
+    # 4. Output projection to vocabulary
+    flops['lm_head'] = B * T * n_embd * vocab_size
+
+    # Total FLOPs
+    total_flops = sum(flops.values())
+    flops['total'] = total_flops
+
+    # Add summary info
+    flops['model_info'] = {
+        'n_layer': n_layer,
+        'n_embd': n_embd,
+        'n_head': n_head,
+        'vocab_size': vocab_size,
+        'batch_size': B,
+        'seq_length': T
+    }
+
+    return flops
+
+def format_flops(flops):
+    """Format FLOP count in human-readable format."""
+    if flops >= 1e12:
+        return f"{flops/1e12:.2f}T"
+    elif flops >= 1e9:
+        return f"{flops/1e9:.2f}G"
+    elif flops >= 1e6:
+        return f"{flops/1e6:.2f}M"
+    elif flops >= 1e3:
+        return f"{flops/1e3:.2f}K"
+    else:
+        return f"{flops:.0f}"
+
 # Training function
 def train(model, train_loader, optimizer, epoch, device, tokenizer=None):
     model.train()
     total_loss = 0
     total_batches = 0
     total_tokens = 0
+    total_flops = 0
     pad_token_id = tokenizer.pad_token_id if tokenizer else None
+
+    # Calculate FLOPs for one forward pass (will multiply by number of batches)
+    sample_batch_size = train_loader.batch_size
+    sample_seq_length = Config.MAX_LENGTH
+    vocab_size = len(tokenizer) if tokenizer else 50000
+
+    flop_info = calculate_model_flops(model, sample_batch_size, sample_seq_length, vocab_size)
+    flops_per_batch = flop_info['total']
 
     #Start timing for throughput calculation
     if torch.cuda.is_available():
@@ -43,7 +147,13 @@ def train(model, train_loader, optimizer, epoch, device, tokenizer=None):
 
         total_tokens += batch_tokens
 
-        logits, loss = model(xb, yb)
+        # Count FLOPs for this batch 
+        actual_batch_size = Config.BATCH_SIZE
+        actual_seq_length = Config.MAX_LENGTH
+        batch_flops = calculate_model_flops(model, actual_batch_size, actual_seq_length, vocab_size)['total']
+        total_flops += batch_flops
+
+        _, loss = model(xb, yb)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
@@ -52,7 +162,11 @@ def train(model, train_loader, optimizer, epoch, device, tokenizer=None):
         total_batches += 1
 
         if (not dist.is_initialized() or dist.get_rank() == 0) and (batch_idx + 1) % 10 == 0:
-            print(f"  Batch {batch_idx + 1}/{len(train_loader)} | train_loss {loss.item():.4f} | train_perplexity {torch.exp(loss).item():.4f}", flush=True)
+            # Calculate current throughput and FLOP rate
+            elapsed_so_far = time.time() - start_time
+            current_throughput = total_tokens / elapsed_so_far if elapsed_so_far > 0 else 0
+            current_flops_per_sec = total_flops / elapsed_so_far if elapsed_so_far > 0 else 0
+            print(f"  Batch {batch_idx + 1}/{len(train_loader)} | train_loss {loss.item():.4f} | train_perplexity {torch.exp(loss).item():.4f} | throughput {current_throughput:.0f} tokens/sec | FLOPs {format_flops(current_flops_per_sec)}/sec", flush=True)
 
         # Clean up memory
         cleanup_memory()
@@ -62,14 +176,21 @@ def train(model, train_loader, optimizer, epoch, device, tokenizer=None):
         torch.cuda.synchronize()
     end_time = time.time()
 
-    # # Calculate final metrics
+    # Calculate final metrics
     elapsed_time = end_time - start_time
     avg_loss = total_loss / total_batches
     avg_perplexity = torch.exp(torch.tensor(avg_loss)).item()
     throughput = total_tokens / elapsed_time if elapsed_time > 0 else 0
+    flops_per_second = total_flops / elapsed_time if elapsed_time > 0 else 0
 
+    # Print FLOP summary
+    if not dist.is_initialized() or dist.get_rank() == 0:
+        print(f"\nFLOP Summary:")
+        print(f"  Total FLOPs: {format_flops(total_flops)}")
+        print(f"  FLOPs per second: {format_flops(flops_per_second)}/sec")
+        print(f"  FLOPs per token: {total_flops/total_tokens:.0f}" if total_tokens > 0 else "  FLOPs per token: N/A")
 
-    return avg_loss, avg_perplexity, throughput, total_tokens
+    return avg_loss, avg_perplexity, throughput
     
 
 def main():
@@ -109,7 +230,7 @@ def main():
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         print(f"{sum(p.numel() for p in model.parameters())/1e6:.5f} M parameters")
-       
+    
     for epoch in range(GPTConfig.max_epochs):
         # Set epoch for distributed sampler
         if hasattr(train_loader, "sampler") and hasattr(train_loader.sampler, "set_epoch"):
@@ -119,10 +240,10 @@ def main():
             print(f"\nEpoch {epoch + 1}/{GPTConfig.max_epochs}")
         
         model.train()
-        avg_loss, avg_perplexity, throughput, total_tokens = train(model, train_loader, optimizer, epoch, device, tokenizer)
+        avg_loss, avg_perplexity, throughput= train(model, train_loader, optimizer, epoch, device, tokenizer)
         
         if rank == 0:
-            print(f"Epoch {epoch + 1} completed | avg_train_loss {avg_loss:.4f} | avg_train_perplexity {avg_perplexity:.4f} | throughput {throughput:.0f} tokens/sec | tokens {total_tokens:,}")
+            print(f"Epoch {epoch + 1} completed | avg_train_loss {avg_loss:.4f} | avg_train_perplexity {avg_perplexity:.4f} | throughput {throughput:.0f} tokens/sec | tokens {throughput:,}")
     if rank == 0:
         if torch.cuda.is_available():
             torch.cuda.synchronize()
