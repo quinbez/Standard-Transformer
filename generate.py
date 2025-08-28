@@ -46,8 +46,8 @@ def text_generation(model, device=None, prompt=None, max_new_tokens=50, temperat
     """
     model = model.to(device)
     tokenizer = load_tokenizer()
-    pad_token_id = tokenizer.token_to_id("[PAD]")
-    eos_token_id = tokenizer.token_to_id("[EOS]")
+    pad_token_id = tokenizer.pad_token_id
+    eos_token_id = tokenizer.eos_token_id
     
     decoded_preds = []
     decoded_targets = []
