@@ -1,17 +1,17 @@
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from model_architecture.config import GPTConfig
 
 # Model architecture
 class Head(nn.Module):
-    def __init__(self, head_size):
+    def __init__(self, head_size, config):
         super().__init__()
-        self.key = nn.Linear(GPTConfig.n_embd, head_size, bias=False)
-        self.query = nn.Linear(GPTConfig.n_embd, head_size, bias=False)
-        self.value = nn.Linear(GPTConfig.n_embd, head_size, bias=False)
-        self.register_buffer('tril', torch.tril(torch.ones(GPTConfig.block_size, GPTConfig.block_size)))
-        self.dropout = nn.Dropout(GPTConfig.dropout)
+        self.config = config
+        self.key = nn.Linear(config.n_embd, head_size, bias=False)
+        self.query = nn.Linear(config.n_embd, head_size, bias=False)
+        self.value = nn.Linear(config.n_embd, head_size, bias=False)
+        self.register_buffer('tril', torch.tril(torch.ones(config.block_size, config.block_size)))
+        self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
         B, T, C = x.shape
@@ -26,11 +26,12 @@ class Head(nn.Module):
         return out
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, num_heads, head_size):
+    def __init__(self, num_heads, head_size, config):
         super().__init__()
-        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
-        self.proj = nn.Linear(GPTConfig.n_embd, GPTConfig.n_embd)
-        self.dropout = nn.Dropout(GPTConfig.dropout)
+        self.config = config
+        self.heads = nn.ModuleList([Head(head_size, config) for _ in range(num_heads)])
+        self.proj = nn.Linear(config.n_embd, config.n_embd)
+        self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
         out = torch.cat([h(x) for h in self.heads], dim=-1)
@@ -38,26 +39,28 @@ class MultiHeadAttention(nn.Module):
         return out
 
 class FeedForward(nn.Module):
-    def __init__(self, n_embd):
+    def __init__(self, n_embd, config):
         super().__init__()
+        self.config = config
         self.net = nn.Sequential(
             nn.Linear(n_embd, 4 * n_embd),
             nn.ReLU(),
             nn.Linear(4 * n_embd, n_embd),
-            nn.Dropout(GPTConfig.dropout),
+            nn.Dropout(config.dropout),
         )
 
     def forward(self, x):
         return self.net(x)
 
 class Block(nn.Module):
-    def __init__(self, n_embd, n_head):
+    def __init__(self, config):
         super().__init__()
-        head_size = n_embd // n_head
-        self.sa = MultiHeadAttention(n_head, head_size)
-        self.ffwd = FeedForward(n_embd)
-        self.ln1 = nn.LayerNorm(n_embd)
-        self.ln2 = nn.LayerNorm(n_embd)
+        self.config = config
+        head_size = config.n_embd // config.n_head
+        self.sa = MultiHeadAttention(config.n_head, head_size, config)
+        self.ffwd = FeedForward(config.n_embd, config)
+        self.ln1 = nn.LayerNorm(config.n_embd)
+        self.ln2 = nn.LayerNorm(config.n_embd)
 
     def forward(self, x):
         x = x + self.sa(self.ln1(x))
@@ -65,13 +68,14 @@ class Block(nn.Module):
         return x
 
 class LanguageModel(nn.Module):
-    def __init__(self,vocab_size):
+    def __init__(self, config):
         super().__init__()
-        self.token_embedding_table = nn.Embedding(vocab_size, GPTConfig.n_embd)
-        self.position_embedding_table = nn.Embedding(GPTConfig.block_size, GPTConfig.n_embd)
-        self.blocks = nn.Sequential(*[Block(GPTConfig.n_embd, n_head=GPTConfig.n_head) for _ in range(GPTConfig.n_layer)])
-        self.ln_f = nn.LayerNorm(GPTConfig.n_embd)
-        self.lm_head = nn.Linear(GPTConfig.n_embd, vocab_size)
+        self.config = config
+        self.token_embedding_table = nn.Embedding(config.vocab_size, config.n_embd)
+        self.position_embedding_table = nn.Embedding(config.block_size, config.n_embd)
+        self.blocks = nn.Sequential(*[Block(config) for _ in range(config.n_layer)])
+        self.ln_f = nn.LayerNorm(config.n_embd)
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size)
 
     def forward(self, idx, targets=None):
         B, T = idx.shape

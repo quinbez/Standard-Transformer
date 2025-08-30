@@ -1,16 +1,17 @@
-# Hyperparameters
+from dataclasses import dataclass
 
 # Global variables will be set in main() function
+@dataclass
 class GPTConfig:
-    vocab_size = None
-    pad_token_id = None
-    eos_token_id = None
-    block_size = 256
-    learning_rate = 1e-5
-    n_embd = 64
-    n_head = 2
-    n_layer = 2
-    dropout = 0.1
-    max_epochs = 10
-    max_new_tokens = 50
-    temperature = 1.0
+    vocab_size: int
+    pad_token_id: int 
+    eos_token_id: int 
+    block_size: int
+    learning_rate: float
+    n_embd: int
+    n_head: int
+    n_layer: int
+    dropout: float
+    max_epochs: int
+    max_new_tokens: int
+    temperature: int
