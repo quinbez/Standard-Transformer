@@ -10,18 +10,16 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 from training import load_model
 from utils.model_utils import *
-
+from model_architecture.config import GPTConfig
 local_rank, device, use_ddp = setup_device()
 @torch.no_grad()
-def evaluate(model, test_loader, tokenizer, max_batches=None,device=None):
+def evaluate(model, test_loader, config, max_batches=None, device=None):
     start_time = time.time()
     model.eval()
     total_loss = 0
     total_batches = 0
 
     # total_tokens = 0
-    pad_token_id = tokenizer.pad_token_id
-
 
     if not dist.is_initialized() or dist.get_rank() == 0:
         if max_batches is None:
@@ -43,9 +41,9 @@ def evaluate(model, test_loader, tokenizer, max_batches=None,device=None):
 
         # Count tokens processed by the model (input tokens)
         # This represents the actual computational work done in the forward pass
-        # if pad_token_id is not None:
+        # if config.pad_token_id is not None:
         #     # Count non-padding tokens in input (what model actually processes)
-        #     non_pad_mask = (input_ids != pad_token_id)
+        #     non_pad_mask = (input_ids != config.pad_token_id)
         #     batch_tokens = non_pad_mask.sum().item()
         # else:
         #     # If no pad token, count all input tokens
@@ -57,9 +55,10 @@ def evaluate(model, test_loader, tokenizer, max_batches=None,device=None):
         _, loss = model(input_ids, targets)
         total_loss += loss.item()
         total_batches += 1
+        perplexity = torch.exp(loss).item()
 
         if (not dist.is_initialized() or dist.get_rank() == 0) and (batch_idx + 1) % 10 == 0:
-             print(f"  Batch {batch_idx + 1}/{len(test_loader)} | test_loss {loss.item():.4f} | test_perplexity {torch.exp(loss).item():.4f}", flush=True)
+            print(f"  Batch {batch_idx + 1}/{len(test_loader)} | test_loss {loss:.4f} | test_perplexity {perplexity:.4f}", flush=True)
 
     # End timing for throughput calculation
     if torch.cuda.is_available():
@@ -70,9 +69,10 @@ def evaluate(model, test_loader, tokenizer, max_batches=None,device=None):
     avg_loss = total_loss / total_batches if total_batches > 0 else float('inf')
     avg_perplexity = torch.exp(torch.tensor(avg_loss)).item() if avg_loss != float('inf') else float('inf')
     elapsed = time.time() - start_time
-    print(f"Evaluation completed in {elapsed:.2f} seconds")
-    print(f"Total Batches Processed: {batch_idx + 1}")
-    print(f"Avg Test CE Loss: {avg_loss:.4f} | Avg Test Perplexity: {avg_perplexity:.4f}")
+    if not dist.is_initialized() or dist.get_rank() == 0:
+        print(f"Evaluation completed in {elapsed:.2f} seconds")
+        print(f"Total Batches Processed: {batch_idx + 1}")
+        print(f"Avg Test CE Loss: {avg_loss:.4f} | Avg Test Perplexity: {avg_perplexity:.4f}")
     return avg_loss,avg_perplexity
 
     # throughput_elapsed = throughput_end_time - throughput_start_time
@@ -102,14 +102,30 @@ def main():
 
     if use_ddp and not dist.is_initialized():
         dist.init_process_group(backend="nccl")
-
+    
     print(f"[Rank {local_rank}] Using device: {device}")
 
     tokenizer = load_tokenizer()
     vocab_size = len(tokenizer)
     
+    # Hyperparameters
+    config = GPTConfig(
+        vocab_size = vocab_size,
+        pad_token_id = tokenizer.pad_token_id,
+        eos_token_id = tokenizer.eos_token_id,
+        block_size = 176, 
+        learning_rate = 2.5e-05,
+        n_embd=112,
+        n_head = 7,
+        n_layer = 3,
+        dropout= 0.149,
+        max_epochs = 10,
+        max_new_tokens = 10,
+        temperature = 1.0
+    )
+
     model_path = "checkpoints/final_model.pt"
-    model = load_model(model_path,vocab_size).to(device)
+    model = load_model(model_path,config).to(device)
     # After model loading, add this check:
 #     print("=== MODEL LOADING VERIFICATION ===")
 
@@ -158,10 +174,6 @@ def main():
     if torch.cuda.is_available():
             torch.cuda.synchronize()
     elapsed = time.time() - start_time
-    if not dist.is_initialized() or dist.get_rank() == 0:
-        print(f"Overall evaluation completed in {elapsed:.2f} seconds")
-        # print(f"Final Results - Loss: {avg_loss:.4f}, Perplexity: {avg_perplexity:.4f}, Throughput: {throughput:.2f} tokens/sec")
-        print(f"Final Results - Loss: {avg_loss:.4f}, Perplexity: {avg_perplexity:.4f}")
 
     if use_ddp and dist.is_initialized():   
         dist.barrier()
