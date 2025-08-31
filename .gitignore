@@ -3,3 +3,4 @@ data_preparation/datasets/opwb
 data_preparation/tokenizer/outputs
 .vscode
 venv/
+checkpoints/
