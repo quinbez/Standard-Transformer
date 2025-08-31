@@ -43,7 +43,6 @@ def setup_device():
         device = torch.device(f"cuda:{local_rank}")
 
         use_ddp = True
-        print(f"DDP mode: Using device cuda:{local_rank}")
     elif torch.cuda.is_available():
         # Single GPU mode
         local_rank = 0
@@ -86,7 +85,7 @@ def load_tokenizer():
     Config.EOS_ID = tokenizer.eos_token_id
     return tokenizer
 
-def load_model(model_path,vocab_size):
+def load_model(model_path,config):
     """
     Load a PCTransformer model from a checkpoint file.
 
@@ -96,8 +95,8 @@ def load_model(model_path,vocab_size):
     Returns:
         PCTransformer: The loaded model with weights.
     """
-    model = LanguageModel(vocab_size)
-    model.load_state_dict(torch.load(model_path), strict = False)
+    model = LanguageModel(config)
+    model.load_state_dict(torch.load(model_path, weights_only=True), strict = False)
     return model
 
 def get_datasets():
