@@ -4,8 +4,6 @@ from dataclasses import dataclass
 @dataclass
 class GPTConfig:
     vocab_size: int
-    pad_token_id: int 
-    eos_token_id: int 
     block_size: int
     learning_rate: float
     n_embd: int
