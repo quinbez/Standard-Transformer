@@ -1,149 +1,137 @@
 import torch
-from training import load_model, load_tokenizer
-import torch.nn.functional as F
-from training import get_loaders
-from torch.nn.parallel import DistributedDataParallel as DDP
-import torch.distributed as dist
 import argparse
-from utils.model_utils import *
-from model_architecture.config import GPTConfig
+from pathlib import Path
+from tokenizers import Tokenizer
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 
+from utils.model_utils import setup_device, load_model, decode_ids
+from model_architecture.config import GPTConfig
+from data_preparation.config import vocab_size
+
+# Device + DDP setup
 local_rank, device, use_ddp = setup_device()
 
-def generate(model, input_ids, config, max_new_tokens=50, temperature=1.0,device=None):
+@torch.no_grad()
+def generate(model, input_ids, max_new_tokens, temperature, device, top_k=None):
     """Generate text samples from the model"""
     model.eval()
-    input_tensor = input_ids.unsqueeze(0).to(device)  # Add batch dimension and move to device
+    input_tensor = input_ids.to(device)  
 
-    for _ in range(config.max_new_tokens):
-        if input_tensor.size(1) > config.block_size:
-            input_tensor = input_tensor[:, -config.block_size:]
-        with torch.no_grad():
-            logits, _ = model(input_tensor)
-            logits = logits[:, -1, :] / config.temperature
-            probs = F.softmax(logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)
-            input_tensor = torch.cat((input_tensor, next_token), dim=1)
-        if next_token.item() == config.eos_token_id:
-            break
-
-    return input_tensor[0] 
-
-def text_generation(model, config, device=None, prompt=None, max_new_tokens=50, temperature=1.0):
-    """
-    Run text generation for a batch of prompts or a user-provided prompt and print results.
-
-    Args:
-        model (nn.Module): The trained model for text generation.
-        config (GPTConfig): Model configuration.
-        device (torch.device, optional): Device to run generation on.
-        prompt (str, optional): User-provided prompt for generation. If None, use test set.
-        max_new_tokens (int): Maximum number of new tokens to generate.
-        temperature (float): Sampling temperature.
-
-    Returns:
-        tuple: (list of generated strings, list of target strings)
-    """
-    model = model.to(device)
-    tokenizer = load_tokenizer()
+    generated = model.generate(
+        input_tensor, 
+        max_new_tokens=max_new_tokens, 
+        temperature=temperature,
+        top_k=top_k 
+    )
     
-    decoded_preds = []
-    decoded_targets = []
+    return generated[0]
 
-    if prompt is not None:
-        # Encode the prompt and generate text
-        input_ids = torch.tensor(tokenizer.encode(prompt).ids, dtype=torch.long).to(device)
-        generated_ids = generate(model, input_ids, config, max_new_tokens=config.max_new_tokens, temperature=config.temperature, device=device)
-        prompt_len = len(input_ids)
-        generated_continuation = generated_ids[prompt_len:].tolist()
-        generated_str = decode_ids(tokenizer, generated_continuation, stop_at_eos=True)
-        print(f"[PROMPT ]: {prompt}")
-        print(f"[PREDICT]: {generated_str}")
-        decoded_preds.append(generated_str)
-        decoded_targets.append("")
-        return decoded_preds, decoded_targets
+def text_generation(model, config, input_ids, device, num_samples, max_new_tokens, temperature, tokenizer=None):
+    model.eval()
+    decoded_outputs = []
     
+    if input_ids is None:
+        start_token = getattr(config, "start_token_id", 0)  
+        input_tensor = torch.tensor([start_token], device=device).unsqueeze(0)
     else:
-        num_samples = 2
-        prompt_len = 5
-        _, _, test_loader = get_loaders(distributed=use_ddp)
+        input_tensor = input_ids.unsqueeze(0).to(device)
         
-        for batch_idx, batch in enumerate(test_loader):
-            input_ids = batch["input_ids"].to(device)
-            
-            for i in range(min(num_samples, input_ids.size(0))):
-                prompt_ids = input_ids[i][:prompt_len]
-                generated_ids = generate(model, prompt_ids, config, max_new_tokens=config.max_new_tokens, temperature=config.temperature, device=device)
-                target_continuation = input_ids[i][prompt_len:]
-                target_continuation = target_continuation[target_continuation != config.pad_token_id].tolist()
-                generated_continuation = generated_ids[prompt_len:].tolist()
-                prompt_str = decode_ids(tokenizer, prompt_ids.tolist())
-                target_str = decode_ids(tokenizer, target_continuation, stop_at_eos=True)
-                generated_str = decode_ids(tokenizer, generated_continuation, stop_at_eos=True)
-                decoded_preds.append(generated_str)
-                decoded_targets.append(target_str)
-                
-                if not dist.is_initialized() or dist.get_rank() == 0:
-                    print(f"\n[Batch {batch_idx + 1}, Sample {i + 1}]")
-                    print(f"[PROMPT ]: {prompt_str}")
-                    print(f"[TARGET ]: {target_str}")
-                    print(f"[PREDICT]: {generated_str}")
-            break
-
-        return decoded_preds, decoded_targets
+    for i in range(num_samples):
+    
+        generated_ids = generate(
+            model=model, 
+            input_ids=input_tensor, 
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            device=device, 
+            top_k=50
+        )
+        
+        # Decode to string
+        if tokenizer is not None:
+            generated_str = tokenizer.decode(generated_ids.tolist(), skip_special_tokens=True)
+        else:
+            generated_str = decode_ids(
+                generated_ids.tolist(),
+                stop_at_eos=True
+            )
+        
+        # Clean formatting
+        generated_str = generated_str.replace('<PAD>', '').replace('<EOS>', '').strip()
+        decoded_outputs.append(generated_str)
+    
+        if not dist.is_initialized() or dist.get_rank() == 0:
+            print(f"\n[Sample {i + 1}]")
+            print(f"[GENERATED]: {generated_str}")
+    
+    return decoded_outputs
 
 def main():
-    """
-    Main entry point for text generation using the predictive coding transformer model.
-    Parses command-line arguments, sets up the model, and runs generation.
-    """
     parser = argparse.ArgumentParser()
-    parser.add_argument('--flash', action='store_true', help='Enable FlashAttention for attention layers')
-    parser.add_argument('--max_tokens', type=int, default=50, help='Maximum number of new tokens to generate')
-    parser.add_argument('--prompt', type=str, default=None, help='Text prompt to use for generation')
-    parser.add_argument('--temperature', type=float, default=1.0, help='Sampling temperature')
+    parser.add_argument('--flash', action='store_true', 
+                        help='Enable FlashAttention for attention layers')
+    parser.add_argument('--num_samples', type=int, default=2, 
+                        help='Number of independent text samples to generate.')
+    parser.add_argument('--max_tokens', type=int, default=50, 
+                        help='Maximum number of new tokens to generate')
+    parser.add_argument('--temperature', type=float, default=1.0, 
+                        help='Sampling temperature')
+    parser.add_argument('--prompt', type=str, default=None,
+                        help='Optional text prompt to condition generation')
     args = parser.parse_args()
 
+    # Setup DDP if needed
     if use_ddp and not dist.is_initialized():
         dist.init_process_group(backend="nccl")
 
-    print(f"[Rank {local_rank}] Using device: {device}")
-
-    tokenizer = load_tokenizer()
-    vocab_size = len(tokenizer)
-
-    # Hyperparameters
+    # Model config
     config = GPTConfig(
         vocab_size = vocab_size,
-        pad_token_id = tokenizer.pad_token_id,
-        eos_token_id = tokenizer.eos_token_id,
-        block_size = 176, 
-        learning_rate = 2.5e-05,
-        n_embd=112,
-        n_head = 7,
-        n_layer = 3,
-        dropout= 0.149,
-        max_epochs = 10,
-        max_new_tokens = 10,
-        temperature = 1.0
+        block_size = 256, 
+        learning_rate = 3e-4,
+        n_embd=256,
+        n_head = 8,
+        n_layer = 6,
+        dropout= 0.1,
+        max_epochs = 2,
+        max_new_tokens = 100,
+        temperature = 0.8
     )
     
+    # Load model
     model_path = "checkpoints/final_model.pt"
     model = load_model(model_path, config).to(device)
 
     if use_ddp:
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
-
-    if not dist.is_initialized() or dist.get_rank() == 0:
-        decoded_preds, decoded_targets = text_generation(
-            model, config, device,
-            prompt=args.prompt,
-            max_new_tokens=args.max_tokens,
-            temperature=args.temperature
+    
+    tokenizer_path = Path("data_preparation/tokenizer.json")        
+        
+    if not tokenizer_path.exists():
+        raise FileNotFoundError(
+            f"Tokenizer not found at {tokenizer_path}. "
+            "Please run 'python data_preparation/prepare_tokens.py' first."
         )
-        if decoded_preds and decoded_targets and local_rank == 0:
-            compute_text_metrics(decoded_preds, decoded_targets)
+        
+    tokenizer = Tokenizer.from_file(str(tokenizer_path))
+    input_ids = None
+    
+    if args.prompt:
+        encoded = tokenizer.encode(args.prompt)
+        input_ids = torch.tensor(encoded.ids, dtype=torch.long)
+            
+    # Run generation only on rank 0
+    if not dist.is_initialized() or dist.get_rank() == 0:
+        decoded_outputs = text_generation(
+            model, config, input_ids, device,
+            num_samples=args.num_samples,
+            max_new_tokens=args.max_tokens,
+            temperature=args.temperature,
+            tokenizer=tokenizer
+        )
 
+    # Cleanup
     if use_ddp and dist.is_initialized():
         dist.barrier()
         dist.destroy_process_group()
